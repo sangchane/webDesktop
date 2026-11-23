@@ -1,0 +1,8 @@
+{
+  "name": "webdesktop",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4.166.0"
+  }
+}
