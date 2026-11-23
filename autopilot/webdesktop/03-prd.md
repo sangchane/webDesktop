@@ -111,7 +111,7 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 - **위험 P1** iPhone Safari 웹앱 조작감(한글·특수키·복귀) — 확인 방법: 첫 스켈레톤을 iPhone 실기기 LTE 로 시험.
 - **위험 P2** Windows 보안 데스크톱 캡처·입력(DXGI + SYSTEM 도우미) — 확인 방법: 스켈레톤 2단계 spike.
 - **위험 B12** macOS 자체 서명 앱의 업데이트 후 권한 유지 — 확인 방법: 서명 같은 두 판으로 업데이트 후 화면 기록 권한 확인. 실패하면 Apple Developer ID(연 99달러)를 사용자에게 묻는다.
-- **위험 H1** workers-rs 의 Durable Objects WebSocket 휴면 — API 는 있음(확인 2026-11-23: github cloudflare/workers-rs v0.9.0 `worker/src/durable.rs` `accept_web_socket`·`websocket_message`·`set_websocket_auto_response`·`sql`). 남은 확인 — 검증 필요 — 확인 방법: 24시간 연결 시험에서 연결 유지·과금 시간 확인. 안 되면 허브만 TypeScript.
+- **위험 H1** workers-rs 의 Durable Objects WebSocket 휴면 — API 는 있음(확인 2026-11-23: github cloudflare/workers-rs v0.9.0 `worker/src/durable.rs` `accept_web_socket`·`websocket_message`·`set_websocket_auto_response`·`sql`). 남은 확인 — 검증 필요 — 확인 방법: 24시간 연결 시험에서 연결 유지·과금 시간 확인. 안 되면 허브만 TypeScript(사용자 확인 뒤).
 - **위험 H2** Cloudflare Access 로 workers.dev 주소를 보호하고, `/agent/*`·`/healthz` 는 경로별 우회(Bypass)로 열 수 있다 — 검증 필요 — 확인 방법: 대시보드에서 workers.dev 에 Access 앱 1개 + 우회 앱 2개를 걸고 각 경로를 curl 로 확인. 안 되면 도메인 1개 구입(가격은 그때 확인).
 - **위험 T1** str0m 은 TURN 할당을 하지 않는다(README 「NIC enumeration and TURN」 — 확인 2026-11-23) → 에이전트용 TURN 클라이언트가 필요. 1단계는 뷰어 브라우저가 TURN 을 쓰므로 영향 작음, 2단계 VPN 은 필수 — 검증 필요 — 확인 방법: crates.io `turn`(webrtc-rs) 클라이언트로 Cloudflare TURN 할당 시험, 안 되면 RFC 8656 할당만 직접 구현.
 - **위험 M1** macOS 로그인 창(FR-014)에서 ScreenCaptureKit·TCC 가 동작한다 — 검증 필요 — 확인 방법: 첫 작업 3 에서 LoginWindow 용 LaunchAgent spike.

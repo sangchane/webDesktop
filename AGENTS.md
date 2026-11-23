@@ -11,4 +11,5 @@
 - 배포 전 계정 한도: `D:\_personal\search-real-estate\docs\cloudflare-limits.md` 를 대조한다.
 - 코드 복사 금지 라이선스: AGPL·GPL(RustDesk·Sunshine 등) — 구조만 참고. `cargo deny` 로 막는다.
 - Jump Desktop·Tailscale 실행 파일은 디컴파일하지 않는다(약관 금지 — research/local-inspection.md 관문).
+- 제품 코드는 전부 Rust 다 — 허브·웹앱·에이전트(사용자 원문 2026-11-23 「RUST 기반으로 … 웹앱」, 다시 확인 같은 날 「rust로 만들어 달라그랬잖아」). 웹앱은 `crates/web`(Leptos CSR → wasm, trunk). TypeScript·JS 는 시험·점검 도구(`tools/`)에만.
 - 상수(상한·기간·임계)는 `03-prd.md` 상수 표가 단일 출처. 코드는 이름으로 옮긴다.

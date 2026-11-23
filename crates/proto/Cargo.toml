@@ -8,6 +8,3 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-ts-rs = "12"

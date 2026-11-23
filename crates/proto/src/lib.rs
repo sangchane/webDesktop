@@ -1,8 +1,6 @@
 //! 공유 계약 계층 — 허브·에이전트·웹이 같이 쓰는 메시지 이름·오류 이름 (05-api-contract.md).
-//! `cargo test -p proto` 가 `web/src/proto/` 에 TS 타입을 다시 만든다(ts-rs, 시험 때만 붙음).
+//! 웹앱(`crates/web`, wasm)도 이 크레이트를 그대로 쓴다 — 타입 생성 단계 없음.
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use ts_rs::TS;
 
 /// 판 major. 다르면 상대는 `upgrade_required` 로 닫는다 (05 「규약」).
 pub const PROTO_MAJOR: u32 = 1;
@@ -22,7 +20,6 @@ pub const SIG_B64_MAX: usize = 128;
 
 /// 05 「오류 이름」 전체. 직렬화 이름이 RFC 9457 `type` 값이다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorType {
     Unauthorized,
@@ -58,14 +55,12 @@ impl ErrorType {
 
 /// RFC 9457 Problem JSON.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct Problem {
     #[serde(rename = "type")]
     pub kind: ErrorType,
     pub title: String,
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
     pub detail: Option<String>,
 }
 
@@ -127,14 +122,12 @@ pub fn reg_code_ok(s: &str) -> bool {
 
 /// E-11 `/healthz` 응답.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct Health {
     pub ok: bool,
     pub proto: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum Os {
     Windows,
@@ -143,7 +136,6 @@ pub enum Os {
 
 /// 호스트 권한 상태 (ERD `device.perm`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum Perm {
     Ok,
@@ -155,7 +147,6 @@ pub enum Perm {
 
 /// 연결 경로 — 뷰어가 본 선택 후보 쌍 (M-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum NetPath {
     Direct,
@@ -164,7 +155,6 @@ pub enum NetPath {
 
 /// 세션 종료 사유 (05 「규약」).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum EndReason {
     ViewerClosed,
@@ -177,14 +167,11 @@ pub enum EndReason {
 
 /// WebRTC `RTCIceServer` 꼴.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct IceServer {
     pub urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
     pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(test, ts(optional))]
     pub credential: Option<String>,
 }
 
@@ -192,7 +179,6 @@ pub struct IceServer {
 
 /// E-02 목록 한 줄 (VPN 칸은 2단계).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -205,7 +191,6 @@ pub struct Device {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct InstallLinks {
     pub windows: String,
     pub macos: String,
@@ -213,7 +198,6 @@ pub struct InstallLinks {
 
 /// E-03 응답.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct EnrollCode {
     pub code: String,
     pub expires_at: String,
@@ -222,7 +206,6 @@ pub struct EnrollCode {
 
 /// E-04 요청.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct EnrollReq {
     pub code: String,
     pub pubkey: String,
@@ -247,14 +230,12 @@ impl Validate for EnrollReq {
 
 /// E-04 응답.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct EnrollResp {
     pub device_id: String,
 }
 
 /// E-13 요청.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct WsTicketReq {
     pub viewer_id: String,
 }
@@ -267,7 +248,6 @@ impl Validate for WsTicketReq {
 
 /// E-13 응답.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct WsTicket {
     pub ticket: String,
     pub hub_ws_url: String,
@@ -276,7 +256,6 @@ pub struct WsTicket {
 
 /// E-07 요청.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct SessionReq {
     pub device_id: String,
     pub viewer_id: String,
@@ -290,7 +269,6 @@ impl Validate for SessionReq {
 
 /// E-07 응답.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 pub struct SessionResp {
     pub session_id: String,
     pub ice_servers: Vec<IceServer>,
@@ -300,7 +278,6 @@ pub struct SessionResp {
 // 한 열거형에 모든 방향을 둔다. 보낸 쪽이 보낼 수 없는 `t` 는 허브 entry 가 match 에서 거절한다.
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(tag = "t")]
 pub enum WsMsg {
     /// E-05 1) 허브→에이전트.
@@ -403,10 +380,9 @@ impl Validate for WsMsg {
     }
 }
 
-// ---- DataChannel (뷰어↔도우미). 스켈레톤은 JSON 글 — decision-log DL-12. ----
+// ---- DataChannel (뷰어↔도우미). JSON 글 — decision-log DL-12. ----
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum MouseButton {
     Left,
@@ -416,7 +392,6 @@ pub enum MouseButton {
 
 /// 채널 `input` (D-01·D-02·D-03). 좌표는 모니터 기준 0~1.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Input {
     MouseMove {
@@ -466,7 +441,6 @@ impl Validate for Input {
 
 /// 채널 `control` (이번 범위는 D-08 만).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(test, derive(TS), ts(export))]
 #[serde(tag = "t")]
 pub enum Control {
     /// D-08 도우미→뷰어: 입력 반영 뒤 첫 인코딩 프레임의 RTP 타임스탬프.

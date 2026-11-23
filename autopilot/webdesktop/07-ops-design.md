@@ -12,7 +12,7 @@
   - Access: 앱 1개(`/` 전체, 정책 = 소유자 이메일) + 우회 앱 2개(`/agent/*`, `/healthz`) — 03 가정 H2.
   - 에이전트: Windows = 설치 파일(서비스 등록 + 도우미), macOS = `.app` 번들 + LaunchDaemon/LaunchAgent plist. 허브 주소는 빌드 때 상수로 넣음. 서명: Windows 없음(SmartScreen 1회), macOS 자체 서명 인증서(03 가정 B12).
 - 검증·배포 명령(`just`):
-  1. `just verify` — `cargo fmt --check` · `cargo clippy -D warnings` · `cargo test` · `cargo deny check`(AGPL/GPL 차단) · 웹 `tsc --noEmit` + 단위 시험 · `proto` → TS 타입 재생성 후 차이 없음 · 허브 통합 시험(로컬 `wrangler dev`).
+  1. `just verify` — `cargo fmt --check` · `cargo clippy -D warnings` · `cargo test` · `cargo deny check`(AGPL/GPL 차단) · 웹 크레이트 wasm clippy + 단위 시험 · 허브 통합 시험(로컬 `wrangler dev`).
   2. `just deploy-hub` — 작업 폴더가 깨끗해야 실행 → `worker-build` → `wrangler deploy` → `/healthz` 의 proto 판 확인 → 배포 커밋 해시를 `deploy.log` 에 기록. 실패하면 `wrangler rollback`.
   3. `just release-agent <os>` — 빌드 → UPDATE_SIGN_ALG 서명 → `wrangler r2 object put` 으로 파일과 `latest-{os}.json` 업로드. 허브는 에이전트가 붙을 때 이 json 과 판을 비교해 M-07 을 보낸다(관리 API 없음).
 - 설정·비밀:
@@ -67,7 +67,7 @@ WebDesktop/
 │  ├─ proto/      공유 메시지·오류 이름·꼴 검사, TS 타입 생성
 │  ├─ hub/        Cloudflare Worker + DO (entry/service/store, migrations/, wrangler.jsonc)
 │  └─ agent/      호스트 에이전트 (resident/helper/platform)
-├─ web/           웹앱 PWA (TypeScript)
+├─ crates/web/    웹앱 (Rust → wasm, Leptos, trunk)
 ├─ tools/         report.py(계측 판정), 설치 시험 체크리스트
 ├─ docs/          goals.md, 설치 안내
 └─ autopilot/     설계 문서

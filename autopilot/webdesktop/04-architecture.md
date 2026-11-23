@@ -21,7 +21,7 @@
 ```mermaid
 flowchart LR
   subgraph Phone[iPhone / Android / 다른 PC]
-    WEB[웹앱 PWA]
+    WEB[웹앱 Rust wasm]
   end
   subgraph CF[Cloudflare 계정]
     ACC[Access 로그인]
@@ -50,7 +50,7 @@ flowchart LR
 |---|---|---|
 | 브라우저가 직접 연결·중계를 쓰려면 | WebRTC. 에이전트는 `str0m`(MIT, Sans-IO — H.264 프레임 쓰기·대역폭 추정 지원, README 「Frame level」). 중계는 TURN 만(브라우저 제약 — B1). **str0m 은 TURN 할당을 하지 않음**(README 「NIC enumeration and TURN」). 결정(DL-9): **1단계 에이전트는 TURN 클라이언트 없음** — 뷰어 브라우저가 TURN 중계 주소를 만들고 에이전트는 그 주소로 UDP 를 보낸다(집 망 UDP 가능 — local-inspection T2). 에이전트 TURN 클라이언트(crates.io `turn` 또는 RFC 8656 할당 직접 — 03 가정 T1)는 2단계 VPN 에서 넣는다 | research/remote-desktop-oss.md, str0m README |
 | 신호·기기 목록·온라인 표시 | Worker + Durable Object 1개(이름 `owner`). 모든 WebSocket 이 이 DO 에 붙는다. 휴면 API + `ping`→`pong` 자동 응답(AGENT_HEARTBEAT_SEC)으로 대기 중 DO 를 깨우지 않음. 오프라인 판정: WebSocket 닫힘 이벤트, 또는 마지막 자동 응답·앱 메시지 시각이 OFFLINE_DETECT_SEC 보다 오래됨(뷰어가 목록을 열 때 검사). 자동 응답 시각 조회 API 가 workers-rs 에 있는지 검증 필요 — 확인 방법: `worker/src/durable.rs` 에서 auto response timestamp 함수 찾기. 없으면 에이전트가 OFFLINE_DETECT_SEC 의 절반마다 앱 메시지 `agent.alive` 를 보냄(DO 가 깸 — 비용 작음, 1인) | Cloudflare DO WebSocket 문서 https://developers.cloudflare.com/durable-objects/best-practices/websockets |
-| Worker 언어 | Rust(`worker` 크레이트 v0.9.0, wasm). 휴면 API·SQLite·자동 응답 있음(확인: github cloudflare/workers-rs `worker/src/durable.rs`). 24시간 연결은 검증 필요 — 확인 방법: 03 가정 H1 시험. 안 되면 허브만 TypeScript | 사용자 요청 「Rust 기반」 |
+| Worker 언어 | Rust(`worker` 크레이트 v0.9.0, wasm). 휴면 API·SQLite·자동 응답 있음(확인: github cloudflare/workers-rs `worker/src/durable.rs`). 24시간 연결은 검증 필요 — 확인 방법: 03 가정 H1 시험. 안 되면 허브만 TypeScript(제품 코드 중 유일한 예외 후보 — 사용자 확인 뒤) | 사용자 요청 「Rust 기반」 |
 | 로그인 | Cloudflare Access 이메일 PIN(DL-4). **Worker 가 둘**(DL-10): `webdesktop-app`(화면·/api, Worker Access 로 보호, `Cf-Access-Jwt-Assertion` 검증) + `webdesktop-hub`(공개: /agent/*·/ws/*·/healthz). 이유: Worker Access 는 WebSocket 을 403 으로 막고 경로 예외가 없으며, 이 계정엔 도메인이 없어 호스트 단위 Access 를 못 씀. app 은 허브 DO 에 `script_name` 바인딩으로 직접 붙고, 뷰어 WebSocket 은 app 이 발급한 1회용 입장권(E-13)으로 허브에 붙음 | https://developers.cloudflare.com/cloudflare-one/identity/one-time-pin/ |
 | TURN 자격 | Worker 가 Cloudflare TURN 키(비밀)로 세션마다 짧은 자격(TURN_CRED_TTL_MIN) 발급. **검증 필요** — 확인 방법: Cloudflare Realtime TURN 문서의 자격 발급 API 경로 확인 | https://developers.cloudflare.com/realtime/turn/ |
 | Windows 캡처(잠금·UAC 포함) | DXGI Desktop Duplication. 서비스(SYSTEM, 세션 0)가 콘솔 세션에 SYSTEM 토큰으로 도우미를 띄움. 도우미가 입력 데스크톱(Default↔Winlogon) 전환을 감지해 다시 붙음. 입력 `SendInput`(보안 데스크톱은 SYSTEM 도우미에서), Ctrl+Alt+Del 은 `SendSAS` | 사전 부검 P2, B11 |
@@ -62,7 +62,7 @@ flowchart LR
 ### 컴포넌트 구조
 ```mermaid
 flowchart TB
-  subgraph web[web/ — TypeScript PWA]
+  subgraph web[crates/web — Rust wasm, Leptos]
     UI[화면: 목록·원격·기기 추가·설정] --> RTC[브라우저 RTCPeerConnection]
     UI --> WSC[허브 WebSocket 클라이언트]
     IN[입력 변환기: 마우스·터치·키보드·한글]
@@ -81,7 +81,7 @@ flowchart TB
   P[crates/proto — 공유 메시지 정의]
   P -.-> hub
   P -.-> agent
-  P -. ts-rs 생성 .-> web
+  P -. 같은 크레이트 .-> web
 ```
 
 ### 데이터 흐름
@@ -158,14 +158,14 @@ Cargo 작업 공간 + 웹 폴더 하나.
 
 | 폴더 | 하는 일 | 하지 않는 일 |
 |---|---|---|
-| `crates/proto` | 허브↔에이전트↔웹 메시지 타입, 오류 이름, 꼴 검사(크기 상한 WS_MSG_MAX_BYTES), `ts-rs` 로 TS 타입 내보내기 | 입출력·상태 |
+| `crates/proto` | 허브↔에이전트↔웹 메시지 타입, 오류 이름, 꼴 검사(크기 상한 WS_MSG_MAX_BYTES). 허브·에이전트·웹앱이 같은 크레이트를 씀 | 입출력·상태 |
 | `crates/hub/src/entry` | Worker HTTP 경로·WebSocket 수신, Access JWT·기기 서명 확인, 빈도 제한(RATE_LIMIT_PER_MIN), 꼴 검사 통과 값만 서비스로 | 규칙·SQL |
 | `crates/hub/src/service` | 등록·세션·신호 중계·TURN 자격·업데이트 알림·VPN 주소 할당 규칙 | SQL·HTTP |
 | `crates/hub/src/store` | DO SQLite 쿼리·마이그레이션 | 규칙 |
 | `crates/agent/src/resident` | 허브 연결·재접속·등록·도우미 띄우기·업데이트·TURN 자격 갱신·(2단계) VPN | 캡처·인코딩 |
 | `crates/agent/src/helper` | 세션 하나: str0m 피어, 캡처→인코딩→전송, 입력 주입 | 허브 직접 연결 |
 | `crates/agent/src/platform/{windows,macos}` | OS 호출(DXGI·MF·SendInput·SCK·VideoToolbox·CGEvent·키 저장소·서비스 등록) | 규칙 |
-| `web/src` | 화면·입력 변환·브라우저 WebRTC | 서버 규칙 |
+| `crates/web/src` | 화면·입력 변환·브라우저 WebRTC(web-sys) | 서버 규칙 |
 
 - 부르는 방향: 입구 → 서비스 → 저장소/플랫폼. 위에서 아래로만.
 - 조립: 실행 파일마다 `main` 한 곳(허브는 DO 생성자)에서 시계·로그·저장소를 만들어 넘긴다.

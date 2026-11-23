@@ -4,10 +4,10 @@
 근거 (진입 사전조사)
 - 정량: DO SQLite 객체당 10GB(유료), SQL 문 100KB·바인드 100개 — https://developers.cloudflare.com/durable-objects/platform/limits (2026-11-23).
 - 정성: DO 는 WebSocket 서버로 한 인스턴스에 수천 연결, 휴면 중 자동 응답 가능 — https://developers.cloudflare.com/durable-objects/best-practices/websockets ; workers-rs `set_websocket_auto_response`(v0.9.0 `worker/src/durable.rs`).
-- 사용자 영향: 오류는 화면에 사람 말로(오류 이름 → 문구 표 하나, `web/src/errors.ts`).
+- 사용자 영향: 오류는 화면에 사람 말로(오류 이름 → 문구 표 하나, `crates/web/src/errors.rs`).
 
 ## 규약
-- 전송: HTTPS JSON + WebSocket(TLS) JSON. 메시지 정의는 `crates/proto` 한 곳 → `ts-rs` 로 TS 타입 생성(공유 계약).
+- 전송: HTTPS JSON + WebSocket(TLS) JSON. 메시지 정의는 `crates/proto` 한 곳 — 허브·에이전트·웹앱(Rust wasm)이 같은 크레이트를 씀(공유 계약).
 - 오류 꼴: RFC 9457 Problem JSON `{type, title, status, detail}`. WebSocket 오류는 `{t:"error", type, detail}`. 스택은 내보내지 않는다.
 - 오류 이름(`type`) 전체: `unauthorized`(401) · `not_found`(404) · `bad_request`(400, 꼴 검사 실패 — DL-12) · `code_invalid`(400) · `code_expired`(400) · `device_offline`(409) · `device_revoked`(403) · `bad_signature`(401) · `upgrade_required`(426) · `rate_limited`(429) · `too_large`(413) · `internal`(500).
 - 세션 종료 사유(`session.end.reason`): `viewer_closed` · `host_closed` · `taken_over` · `host_shutdown` · `failed` · `device_revoked`.

@@ -1,0 +1,11 @@
+[package]
+name = "web"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+# 웹앱 — Rust → wasm(Leptos CSR), trunk 로 빌드 (decision-log DL-13).
+[dependencies]
+proto = { path = "../proto" }
+leptos = { version = "0.8", features = ["csr"] }

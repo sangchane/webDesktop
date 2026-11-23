@@ -1,0 +1,3 @@
+# 웹앱 Worker(crates/app) 가 이 폴더를 정적 자산으로 올린다.
+[build]
+dist = "dist"

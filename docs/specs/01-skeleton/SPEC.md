@@ -11,17 +11,17 @@
 ## 제안 변경 (이 작업에서 만드는 것)
 | 부품 | 파일 | 이번 범위 | 미룸(다음 작업) |
 |---|---|---|---|
-| 공유 계약 | `crates/proto/src/lib.rs` | 05 의 E-03·E-04·E-05·E-06·E-07, M-01~M-04·M-09·M-10, D-01·D-02·D-03·D-08 메시지 타입, 오류 이름 전체, 꼴 검사(`validate()`), `ts-rs` 로 `web/src/proto/` 생성 | M-05~M-08·M-11~M-13, D-04~D-07 |
+| 공유 계약 | `crates/proto/src/lib.rs` | 05 의 E-03·E-04·E-05·E-06·E-07, M-01~M-04·M-09·M-10, D-01·D-02·D-03·D-08 메시지 타입, 오류 이름 전체, 꼴 검사(`validate()`·`parse()`) — 웹앱도 같은 크레이트 | M-05~M-08·M-11~M-13, D-04~D-07 |
 | 허브 | `crates/hub/` (Worker + DO `Hub`) | `/healthz`, 정적 웹앱, Access JWT 검증, 등록 코드(활성 1개), `/agent/install/windows?t=`, `/agent/enroll`, `/agent/ws`(nonce 서명), `/api/ws`, `/api/devices`, `/api/sessions`(TURN 자격 + 이어받기), 신호 중계, `session.viewer_stats` 저장, 오프라인 판정, ping 자동 응답 | 접속 기록 화면 E-09·기기 제거 E-08·업데이트 E-10·만료 정리 알람·VPN |
-| 웹앱 | `web/` (TypeScript, Vite, 프레임워크 없음) | 목록·기기 추가(코드·설치 링크)·원격 화면(WebRTC 수신), 입력 변환기(마우스·터치 트랙패드·`text` 한글·특수키 막대 최소: Esc·Tab·Ctrl·Alt·Win·Del), `?relay=1`, M-10 계측(첫 프레임·SC-003 측정법) | 클립보드·모니터 선택·화질·Keyboard Lock·접속 기록 화면 |
+| 웹앱 | `crates/web/` (Rust → wasm, Leptos CSR, trunk — DL-13) | 목록·기기 추가(코드·설치 링크)·원격 화면(WebRTC 수신), 입력 변환기(마우스·터치 트랙패드·`text` 한글·특수키 막대 최소: Esc·Tab·Ctrl·Alt·Win·Del), `?relay=1`, M-10 계측(첫 프레임·SC-003 측정법) | 클립보드·모니터 선택·화질·Keyboard Lock·접속 기록 화면 |
 | 에이전트 | `crates/agent/` (Windows, 콘솔 실행) | 설정 파일·Ed25519 키(DPAPI + 파일 ACL), 등록(코드 입력 프롬프트), 허브 WS·재접속, 세션: DXGI Desktop Duplication(기본 모니터) → `openh264` → `str0m` H.264 트랙, DataChannel 입력 → `SendInput`(마우스·HID 키·유니코드 글자), D-08 `input.applied` | Windows 서비스·SYSTEM 도우미·보안 데스크톱(첫 작업 2), HW 인코더, macOS(첫 작업 3), 자동 업데이트 |
 
-- **웹 프레임워크 없음**: 화면 3개라 순수 TS + DOM 으로 한다(dev:ui 의 React 스택은 화면이 늘면 그때). 사유: 의존 최소(바닥선 17).
+- **웹앱도 Rust**: 사용자 원문 「RUST 기반 … 웹앱」(DL-13). Leptos CSR 하나만 더하고 WebRTC·입력은 web-sys 로 직접. 사유: 의존 최소(바닥선 17).
 - **`just` 대신 `scripts/verify.ps1`**: 새 도구 설치를 피한다(07 의 `just verify` 를 이 스크립트로 대신 — decision-log 에 기록).
 - **DXGI·SendInput 은 사용자 세션의 일반 프로세스로**(이번은 콘솔 실행) — 잠금 화면은 첫 작업 2.
 
 ## 코드 위치와 바닥선
-- 04 「코드 구조」 그대로: `crates/proto` · `crates/hub/src/{entry,service,store}` · `crates/agent/src/{resident,helper,platform/windows}` · `web/src`.
+- 04 「코드 구조」 그대로: `crates/proto` · `crates/hub/src/{entry,service,store}` · `crates/agent/src/{resident,helper,platform/windows}` · `crates/web/src`.
 - 바닥선:
   - 1 계층: 허브 `entry`(경로·인증·꼴 검사) → `service`(규칙) → `store`(SQL). 에이전트 `resident`(허브 연결·등록) / `helper`(세션) / `platform/windows`(OS 호출).
   - 3 오류: `proto::ErrorType` 로 거절, 그 밖은 `internal` + error 로그.
@@ -31,13 +31,13 @@
   - 6 트랜잭션: 등록 = 05 「트랜잭션」 그대로(`transactionSync` 대신 DO 단일 스레드 + SQL 한 묶음).
   - 8 설정: 허브 비밀 검사(빠지면 500 `internal`), 에이전트 설정 검사 실패 시 기동 거부.
   - 11 빈도 제한: 허브 입구 IP·기기 RATE_LIMIT_PER_MIN(DO 메모리 계수기 — 휴면하면 초기화, 1인이라 수용).
-  - 15 공유 계약: `ts-rs` 생성 파일을 커밋하고 verify 가 재생성 후 차이 0 확인.
+  - 15 공유 계약: 허브·에이전트·웹앱이 `proto` 크레이트 하나를 씀(생성 단계 없음).
   - 16·17 품질·의존: `scripts/verify.ps1`, `Cargo.lock`·`package-lock.json`, `cargo deny`(AGPL/GPL 금지).
 
 ## 완료 기준 (진행 장부: tasks.md)
 | # | 기준 | 요구 ID | 검증 |
 |---|---|---|---|
-| C1 | `scripts/verify.ps1` 가 fmt·clippy·test·deny·tsc·proto 재생성 차이 0 을 한 번에 돌리고 종료 코드 0 | 바닥선 16 | `pwsh scripts/verify.ps1` → `VERIFY OK` |
+| C1 | `scripts/verify.ps1` 가 fmt·clippy(웹앱 wasm 포함)·test·deny 를 한 번에 돌리고 종료 코드 0 | 바닥선 16 | `pwsh scripts/verify.ps1` → `VERIFY OK` |
 | C2 | 허브가 Cloudflare 에 올라가 `/healthz` 가 `{"ok":true,"proto":1}` | E-11 | `curl -s https://webdesktop-hub.<계정>.workers.dev/healthz` |
 | C3 | Access 켠 뒤: `/api/devices` 는 로그인 없이 401 또는 Access 로그인 화면, `/agent/enroll`·`/healthz` 는 허브 응답(우회) | FR-001, H2 | `node tools/check-access.mjs` → `ACCESS OK` |
 | C4 | 허브 통합 시험(로컬 `wrangler dev`): 등록 코드 만료·대입·재사용·새 코드, nonce 서명 성공/실패, 세션 이어받기, 오프라인 판정이 06 표대로 | FR-002·003·004 | `node --test tools/hub.test.mjs` → `# fail 0` |
@@ -51,7 +51,7 @@
 
 ## 테스트 계획
 - 단위(`cargo test`): proto 왕복·꼴 검사, 허브 service(등록 규칙·코드 생성 알파벳·이어받기·오프라인 판정 — 순수 함수로 떼어 시계 주입), 에이전트 좌표 변환·HID→VK 표·Ed25519 서명.
-- 단위(웹, `node --test`): 입력 변환기(두 손가락 탭 → 오른쪽, composition 중복 없음, 특수키).
+- 단위(웹, `cargo test -p web` — 입력 변환은 순수 함수로 떼어 native 에서): 입력 변환기(두 손가락 탭 → 오른쪽, composition 중복 없음, 특수키).
 - 통합: `wrangler dev` 위 허브에 가짜 에이전트·가짜 뷰어(Node WebSocket) — Access 는 시험용 JWKS 주입(`ACCESS_TEST_JWKS` vars, 운영 배포에는 없음 — 설정 검사가 운영에서 이 값이 있으면 거부).
 - E2E: C5~C8 실기기.
 
