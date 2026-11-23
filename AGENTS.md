@@ -12,4 +12,5 @@
 - 코드 복사 금지 라이선스: AGPL·GPL(RustDesk·Sunshine 등) — 구조만 참고. `cargo deny` 로 막는다.
 - Jump Desktop·Tailscale 실행 파일은 디컴파일하지 않는다(약관 금지 — research/local-inspection.md 관문).
 - 제품 코드는 전부 Rust 다 — 허브·웹앱·에이전트(사용자 원문 2026-11-23 「RUST 기반으로 … 웹앱」, 다시 확인 같은 날 「rust로 만들어 달라그랬잖아」). 웹앱은 `crates/web`(Leptos CSR → wasm, trunk). TypeScript·JS 는 시험·점검 도구(`tools/`)에만.
+- 배포는 묻지 않고 한다(사용자 2026-11-23 「배포는 니가 알아서해 묻지말고」). 순서: 커밋 → `crates/hub`·`crates/app` 에서 `npx wrangler deploy` → `node tools/check-access.mjs` → `ACCESS OK`. 실패하면 `npx wrangler rollback` 으로 직전 판. 배포한 판 ID 는 NEXT.md 에.
 - 상수(상한·기간·임계)는 `03-prd.md` 상수 표가 단일 출처. 코드는 이름으로 옮긴다.
