@@ -2,10 +2,12 @@
 //! 브라우저를 모르는 순수 코드라 native `cargo test -p web` 로 시험한다.
 use proto::{Input, MouseButton, INPUT_TEXT_MAX};
 
-/// 03 상수 표 — 탭으로 보는 최대 시간·이동, 트랙패드 감도.
+/// 03 상수 표 — 탭으로 보는 최대 시간·이동, 트랙패드 감도, 길게 누르기, 두 번 탭 간격.
 pub const TAP_MAX_MS: f64 = 250.0;
 pub const TAP_SLOP_PX: f64 = 10.0;
 pub const TRACKPAD_GAIN: f64 = 1.5;
+pub const LONG_PRESS_MS: f64 = 500.0;
+pub const DOUBLE_TAP_MS: f64 = 300.0;
 
 /// USB HID 키보드 페이지(0x07) 번호.
 pub const HID_ENTER: u16 = 0x28;
@@ -14,6 +16,7 @@ pub const HID_BACKSPACE: u16 = 0x2A;
 pub const HID_TAB: u16 = 0x2B;
 pub const HID_DELETE: u16 = 0x4C;
 pub const HID_CTRL: u16 = 0xE0;
+pub const HID_SHIFT: u16 = 0xE1;
 pub const HID_ALT: u16 = 0xE2;
 pub const HID_WIN: u16 = 0xE3;
 
@@ -66,7 +69,7 @@ pub fn hid_usage(code: &str) -> Option<u16> {
         "IntlBackslash" => 0x64,
         "ContextMenu" => 0x65,
         "ControlLeft" => HID_CTRL,
-        "ShiftLeft" => 0xE1,
+        "ShiftLeft" => HID_SHIFT,
         "AltLeft" => HID_ALT,
         "MetaLeft" => HID_WIN,
         "ControlRight" => 0xE4,
@@ -166,17 +169,91 @@ fn centroid(pts: &[(f64, f64)]) -> (f64, f64) {
     (x / n, y / n)
 }
 
-/// 뷰어 하나의 입력 상태 — 순번·트랙패드 손짓·입력칸 비교·잡아 둔 수정키.
+/// 두 손가락 사이 거리(집기 판정). 한 손가락이면 0.
+fn spread(pts: &[(f64, f64)]) -> f64 {
+    match pts {
+        [a, b, ..] => (a.0 - b.0).hypot(a.1 - b.1),
+        _ => 0.0,
+    }
+}
+
+/// 무대(stage) 안 영상 자리 — 영상 요소의 왼쪽 위·크기(확대 반영)와 영상 원본 크기. 손가락 좌표는 무대 px.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Geo {
+    pub x0: f64,
+    pub y0: f64,
+    pub ew: f64,
+    pub eh: f64,
+    pub vw: f64,
+    pub vh: f64,
+}
+
+impl Geo {
+    pub fn unit(&self, p: (f64, f64)) -> Option<(f32, f32)> {
+        to_unit(
+            p.0 - self.x0,
+            p.1 - self.y0,
+            self.ew,
+            self.eh,
+            self.vw,
+            self.vh,
+        )
+    }
+
+    /// 0~1 → 무대 px(커서 그리기·따라가기).
+    pub fn stage(&self, u: (f64, f64)) -> Option<(f64, f64)> {
+        from_unit(u, self.ew, self.eh, self.vw, self.vh).map(|(x, y)| (x + self.x0, y + self.y0))
+    }
+
+    /// 화면에 보이는 영상 크기(px, 검은 띠 뺌).
+    fn content(&self) -> (f64, f64) {
+        content_rect(self.ew, self.eh, self.vw, self.vh).map_or((0.0, 0.0), |r| (r.2, r.3))
+    }
+}
+
+/// 집기 한 걸음 — 화면 확대(`zoom::Zoom::pinch`)에 넘긴다. 호스트에는 아무것도 안 간다.
+#[derive(Debug, PartialEq)]
+pub struct Pinch {
+    pub factor: f64,
+    pub center: (f64, f64),
+    pub pan: (f64, f64),
+}
+
+/// 두 손가락 손짓 — 처음 움직임으로 정하고 손을 뗄 때까지 유지한다(스크롤하다 확대되지 않게).
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Two {
+    #[default]
+    Undecided,
+    Scroll,
+    Pinch,
+}
+
+/// 탭 하나 — (시각, 무대 px, 보낸 0~1 좌표).
+type Tap = (f64, (f64, f64), (f32, f32));
+
+/// 뷰어 하나의 입력 상태 — 순번·터치 손짓·입력칸 비교·잡아 둔 수정키.
 #[derive(Default)]
 pub struct Converter {
     seq: u32,
     /// 트랙패드 커서(0~1). 터치는 상대 이동이라 뷰어가 커서 위치를 갖고 있다.
     pub cursor: (f64, f64),
+    /// 직접 터치(누른 곳 클릭) — 아니면 트랙패드.
+    pub direct: bool,
     fingers: usize,
     fingers_max: usize,
     anchor: (f64, f64),
+    spread: f64,
+    /// 첫 손가락이 닿은 곳(무대 px).
+    start: (f64, f64),
     started_ms: f64,
     past_slop: bool,
+    two: Two,
+    /// 트랙패드: 탭 바로 뒤 다시 닿음 → 움직이면 끌기.
+    tap_then_touch: bool,
+    /// 왼쪽 버튼을 누른 채 끄는 중.
+    dragging: bool,
+    /// 마지막 왼쪽 탭(시각, 무대 px, 보낸 좌표) — 두 번 탭을 같은 자리로(더블클릭).
+    last_tap: Option<Tap>,
     /// 입력칸에서 이미 보낸 글.
     sent: String,
     latched: Vec<u16>,
@@ -339,64 +416,179 @@ impl Converter {
         self.sent.clear();
     }
 
-    /// 손가락 수가 바뀔 때마다 부른다(touchstart, 손가락이 남은 touchend).
+    /// 손가락 수가 바뀔 때마다 부른다(touchstart, 손가락이 남은 touchend). 좌표는 무대 px.
     pub fn touch_start(&mut self, pts: &[(f64, f64)], t_ms: f64) {
         if self.fingers == 0 {
             self.started_ms = t_ms;
             self.past_slop = false;
             self.fingers_max = 0;
+            self.two = Two::Undecided;
+            self.start = centroid(pts);
+            self.tap_then_touch = !self.direct
+                && self
+                    .last_tap
+                    .is_some_and(|(t, ..)| t_ms - t <= DOUBLE_TAP_MS);
+        }
+        if pts.len() != self.fingers {
+            // 손가락 수가 바뀌면 두 손가락 손짓을 다시 정한다(한 손가락 스크롤 뒤 집기).
+            self.two = Two::Undecided;
         }
         self.fingers = pts.len();
         self.fingers_max = self.fingers_max.max(pts.len());
         self.anchor = centroid(pts);
+        self.spread = spread(pts);
     }
 
-    /// 한 손가락 = 커서 이동(상대), 두 손가락 = 스크롤. `view` = 화면에 보이는 영상 크기(px).
-    pub fn touch_move(&mut self, pts: &[(f64, f64)], view: (f64, f64)) -> Vec<Input> {
+    /// 트랙패드: 한 손가락 = 커서 이동(상대), 탭 뒤 끌기 = 왼쪽 끌기, 두 손가락 = 스크롤 또는 집기.
+    /// 직접 터치: 한 손가락 = 스크롤, 길게 누른 뒤 끌기 = 왼쪽 끌기, 두 손가락 = 집기.
+    pub fn touch_move(
+        &mut self,
+        pts: &[(f64, f64)],
+        geo: &Geo,
+        t_ms: f64,
+    ) -> (Vec<Input>, Option<Pinch>) {
         if pts.len() != self.fingers {
             self.touch_start(pts, self.started_ms);
-            return vec![];
+            return (vec![], None);
         }
         let c = centroid(pts);
+        let sp = spread(pts);
         let (dx, dy) = (c.0 - self.anchor.0, c.1 - self.anchor.1);
+        let mut out = vec![];
+        // 두 손가락 손짓 끝에 남은 손가락은 아무것도 하지 않는다(집기 뒤 커서가 튀거나 스크롤되지 않게).
+        if self.fingers == 1 && self.fingers_max >= 2 {
+            self.anchor = c;
+            return (out, None);
+        }
+        let grow = (sp - self.spread).abs();
+        let still = dx.hypot(dy) <= TAP_SLOP_PX && grow <= TAP_SLOP_PX;
+        if self.fingers == 2 && self.two == Two::Undecided {
+            if still {
+                return (out, None);
+            }
+            self.two = if self.direct || grow > dx.hypot(dy) {
+                Two::Pinch
+            } else {
+                Two::Scroll
+            };
+        }
         if !self.past_slop {
-            if dx.hypot(dy) <= TAP_SLOP_PX {
-                return vec![];
+            if still {
+                return (out, None);
             }
             self.past_slop = true;
-        }
-        self.anchor = c;
-        match self.fingers {
-            1 if view.0 > 0.0 && view.1 > 0.0 => {
-                let x = (self.cursor.0 + dx * TRACKPAD_GAIN / view.0).clamp(0.0, 1.0);
-                let y = (self.cursor.1 + dy * TRACKPAD_GAIN / view.1).clamp(0.0, 1.0);
-                vec![self.mouse_move(x as f32, y as f32)]
+            if self.fingers == 1 {
+                let at = if self.tap_then_touch {
+                    Some((self.cursor.0 as f32, self.cursor.1 as f32))
+                } else if self.direct && t_ms - self.started_ms >= LONG_PRESS_MS {
+                    geo.unit(self.start)
+                } else {
+                    None
+                };
+                if let Some((x, y)) = at {
+                    self.dragging = true;
+                    out.push(self.mouse_move(x, y));
+                    out.extend(self.mouse_button(MouseButton::Left, true));
+                }
             }
-            // 손가락을 올리면 아래 내용이 올라온다(트랙패드 자연 스크롤).
-            2 => vec![self.wheel(-dx as f32, -dy as f32)],
-            _ => vec![],
         }
+        let (prev, prev_sp) = (self.anchor, self.spread);
+        self.anchor = c;
+        self.spread = sp;
+        match (self.fingers, self.direct) {
+            (1, true) if self.dragging => {
+                if let Some((x, y)) = geo.unit(c) {
+                    out.push(self.mouse_move(x, y));
+                }
+            }
+            // 손가락을 올리면 아래 내용이 올라온다(터치 화면 스크롤).
+            (1, true) => out.push(self.wheel(-dx as f32, -dy as f32)),
+            (1, false) => {
+                let (vw, vh) = geo.content();
+                if vw > 0.0 && vh > 0.0 {
+                    let x = (self.cursor.0 + dx * TRACKPAD_GAIN / vw).clamp(0.0, 1.0);
+                    let y = (self.cursor.1 + dy * TRACKPAD_GAIN / vh).clamp(0.0, 1.0);
+                    out.push(self.mouse_move(x as f32, y as f32));
+                }
+            }
+            (2, _) if self.two == Two::Pinch => {
+                let factor = if prev_sp > 0.0 { sp / prev_sp } else { 1.0 };
+                let pinch = Pinch {
+                    factor,
+                    center: prev,
+                    pan: (dx, dy),
+                };
+                return (out, Some(pinch));
+            }
+            (2, _) => out.push(self.wheel(-dx as f32, -dy as f32)),
+            _ => {}
+        }
+        (out, None)
     }
 
-    /// touchend·touchcancel. `left` = 아직 닿은 손가락. 모두 떨어졌고 짧게 움직임 없이 닿았으면 탭.
-    pub fn touch_end(&mut self, left: &[(f64, f64)], t_ms: f64) -> Vec<Input> {
+    /// touchcancel(OS 손짓·손바닥 거름) — 탭으로 보지 않고 끌기만 놓는다.
+    pub fn touch_cancel(&mut self) -> Vec<Input> {
+        self.fingers = 0;
+        self.past_slop = true;
+        self.release_all()
+    }
+
+    /// 누른 채인 끌기와 잡아 둔 수정키를 모두 놓는다(손짓 취소·화면을 떠날 때).
+    pub fn release_all(&mut self) -> Vec<Input> {
+        let mut out = vec![];
+        if std::mem::take(&mut self.dragging) {
+            out.push(Input::MouseButton {
+                seq: self.next(),
+                button: MouseButton::Left,
+                down: false,
+            });
+        }
+        out.extend(self.release());
+        out
+    }
+
+    /// touchend. `left` = 아직 닿은 손가락. 모두 떨어졌을 때 탭·길게 누르기·끌기 끝을 판정한다.
+    pub fn touch_end(&mut self, left: &[(f64, f64)], geo: &Geo, t_ms: f64) -> Vec<Input> {
         if !left.is_empty() {
             self.fingers = left.len();
             self.anchor = centroid(left);
+            self.spread = spread(left);
             return vec![];
         }
         self.fingers = 0;
-        if self.past_slop || t_ms - self.started_ms > TAP_MAX_MS {
+        if self.dragging {
+            self.dragging = false;
+            self.last_tap = None;
+            return self.mouse_button(MouseButton::Left, false);
+        }
+        let held = t_ms - self.started_ms;
+        let long = self.direct && self.fingers_max == 1 && held >= LONG_PRESS_MS;
+        if self.past_slop || (held > TAP_MAX_MS && !long) {
             return vec![];
         }
         let button = match self.fingers_max {
+            1 if long => MouseButton::Right,
             1 => MouseButton::Left,
             2 => MouseButton::Right,
             _ => return vec![],
         };
-        // 호스트 커서가 다른 곳에 있을 수 있어 뷰어가 보여 준 커서 자리로 먼저 옮긴다.
-        let (x, y) = (self.cursor.0 as f32, self.cursor.1 as f32);
-        let mut out = vec![self.mouse_move(x, y)];
+        let at = if self.direct {
+            // 두 번째 탭이 첫 탭 가까이면 같은 자리로 — 폰 배율에선 손가락 3px 가 PC 15px 라 더블클릭이 안 된다.
+            let again = self.last_tap.filter(|(t, p, _)| {
+                button == MouseButton::Left
+                    && t_ms - t <= DOUBLE_TAP_MS
+                    && (p.0 - self.start.0).hypot(p.1 - self.start.1) <= TAP_SLOP_PX * 2.0
+            });
+            match again.map(|a| a.2).or_else(|| geo.unit(self.start)) {
+                Some(u) => u,
+                None => return vec![],
+            }
+        } else {
+            // 호스트 커서가 다른 곳에 있을 수 있어 뷰어가 보여 준 커서 자리로 먼저 옮긴다.
+            (self.cursor.0 as f32, self.cursor.1 as f32)
+        };
+        self.last_tap = (button == MouseButton::Left).then_some((t_ms, self.start, at));
+        let mut out = vec![self.mouse_move(at.0, at.1)];
         out.extend(self.mouse_button(button, true));
         out.extend(self.mouse_button(button, false));
         out
@@ -476,23 +668,57 @@ mod tests {
         assert_eq!(to_unit(1.0, 1.0, 0.0, 10.0, 1920.0, 1080.0), None);
     }
 
+    /// 영상이 무대를 꽉 채운 자리(검은 띠 없음).
+    fn geo(w: f64, h: f64) -> Geo {
+        Geo {
+            ew: w,
+            eh: h,
+            vw: w,
+            vh: h,
+            ..Default::default()
+        }
+    }
+
+    fn buttons(v: &[Input]) -> Vec<(MouseButton, bool)> {
+        v.iter()
+            .filter_map(|i| match i {
+                Input::MouseButton { button, down, .. } => Some((*button, *down)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_move(v: &[Input]) -> (f32, f32) {
+        v.iter()
+            .rev()
+            .find_map(|i| match i {
+                Input::MouseMove { x, y, .. } => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    const G: Geo = Geo {
+        x0: 0.0,
+        y0: 0.0,
+        ew: 400.0,
+        eh: 300.0,
+        vw: 400.0,
+        vh: 300.0,
+    };
+
     #[test]
     fn two_finger_tap_is_right_click() {
         let mut c = Converter::default();
         c.touch_start(&[(100.0, 100.0)], 0.0);
         c.touch_start(&[(100.0, 100.0), (140.0, 100.0)], 20.0);
-        assert!(c.touch_end(&[(140.0, 100.0)], 120.0).is_empty());
-        let out = c.touch_end(&[], 150.0);
-        let want = [MouseButton::Right, MouseButton::Right];
+        assert!(c.touch_end(&[(140.0, 100.0)], &G, 120.0).is_empty());
+        let out = c.touch_end(&[], &G, 150.0);
         assert!(matches!(out[0], Input::MouseMove { .. }));
-        let got: Vec<_> = out[1..]
-            .iter()
-            .map(|i| match i {
-                Input::MouseButton { button, .. } => *button,
-                _ => panic!("{i:?}"),
-            })
-            .collect();
-        assert_eq!(got, want);
+        assert_eq!(
+            buttons(&out),
+            [(MouseButton::Right, true), (MouseButton::Right, false)]
+        );
     }
 
     #[test]
@@ -500,27 +726,24 @@ mod tests {
         let mut c = Converter::default();
         c.touch_start(&[(10.0, 10.0)], 0.0);
         assert!(
-            c.touch_move(&[(14.0, 12.0)], (400.0, 300.0)).is_empty(),
+            c.touch_move(&[(14.0, 12.0)], &G, 50.0).0.is_empty(),
             "흔들림은 이동이 아님"
         );
-        assert_eq!(c.touch_end(&[], 100.0).len(), 3);
+        assert_eq!(c.touch_end(&[], &G, 100.0).len(), 3);
 
         c.touch_start(&[(10.0, 10.0)], 1000.0);
-        assert_eq!(c.touch_move(&[(60.0, 10.0)], (400.0, 300.0)).len(), 1);
-        assert!(c.touch_end(&[], 1100.0).is_empty());
+        assert_eq!(c.touch_move(&[(60.0, 10.0)], &G, 1050.0).0.len(), 1);
+        assert!(c.touch_end(&[], &G, 1100.0).is_empty());
 
         c.touch_start(&[(10.0, 10.0)], 2000.0);
-        assert!(c.touch_end(&[], 2000.0 + TAP_MAX_MS + 1.0).is_empty());
+        assert!(c.touch_end(&[], &G, 2000.0 + TAP_MAX_MS + 1.0).is_empty());
     }
 
     #[test]
     fn trackpad_moves_cursor_relative_and_clamps() {
-        let mut c = Converter {
-            cursor: (0.5, 0.5),
-            ..Default::default()
-        };
+        let mut c = Converter::new();
         c.touch_start(&[(0.0, 0.0)], 0.0);
-        let out = c.touch_move(&[(100.0, 0.0)], (300.0, 200.0));
+        let (out, _) = c.touch_move(&[(100.0, 0.0)], &geo(300.0, 200.0), 10.0);
         match out[..] {
             [Input::MouseMove { x, y, .. }] => {
                 assert!((x - 1.0).abs() < 1e-6, "0.5 + 100*1.5/300 = 1.0");
@@ -528,16 +751,148 @@ mod tests {
             }
             _ => panic!("{out:?}"),
         }
-        c.touch_move(&[(400.0, 0.0)], (300.0, 200.0));
+        c.touch_move(&[(400.0, 0.0)], &geo(300.0, 200.0), 20.0);
         assert!(c.cursor.0 <= 1.0);
+        // 확대하면(영상이 두 배로 보이면) 같은 손가락 이동에 커서가 절반만 간다 — 정밀해진다.
+        let mut c = Converter::new();
+        c.touch_start(&[(0.0, 0.0)], 0.0);
+        c.touch_move(&[(100.0, 0.0)], &geo(600.0, 400.0), 10.0);
+        assert!((c.cursor.0 - 0.75).abs() < 1e-6);
     }
 
     #[test]
-    fn two_finger_drag_scrolls() {
+    fn two_fingers_pick_scroll_or_pinch_once() {
         let mut c = Converter::default();
         c.touch_start(&[(0.0, 100.0), (40.0, 100.0)], 0.0);
-        let out = c.touch_move(&[(0.0, 50.0), (40.0, 50.0)], (300.0, 200.0));
+        let (out, p) = c.touch_move(&[(0.0, 50.0), (40.0, 50.0)], &G, 10.0);
         assert!(matches!(out[..], [Input::Wheel { dy, .. }] if dy == 50.0));
+        assert!(p.is_none());
+        // 스크롤로 정했으면 손가락이 벌어져도 확대하지 않는다.
+        let (out, p) = c.touch_move(&[(0.0, 50.0), (80.0, 50.0)], &G, 20.0);
+        assert!(p.is_none() && matches!(out[..], [Input::Wheel { .. }]));
+        c.touch_end(&[], &G, 30.0);
+
+        // 벌어지면 집기 — 호스트에는 아무것도 안 간다.
+        c.touch_start(&[(100.0, 100.0), (140.0, 100.0)], 1000.0);
+        let (out, p) = c.touch_move(&[(80.0, 100.0), (160.0, 100.0)], &G, 1010.0);
+        assert!(out.is_empty());
+        assert_eq!(
+            p,
+            Some(Pinch {
+                factor: 2.0,
+                center: (120.0, 100.0),
+                pan: (0.0, 0.0)
+            })
+        );
+        assert!(
+            c.touch_end(&[], &G, 1100.0).is_empty(),
+            "집기 뒤엔 클릭 없음"
+        );
+    }
+
+    #[test]
+    fn leftover_finger_after_pinch_is_ignored_and_cancel_is_not_a_tap() {
+        let mut c = Converter {
+            direct: true,
+            ..Converter::new()
+        };
+        c.touch_start(&[(100.0, 100.0), (140.0, 100.0)], 0.0);
+        c.touch_move(&[(80.0, 100.0), (160.0, 100.0)], &G, 10.0);
+        c.touch_end(&[(160.0, 100.0)], &G, 20.0);
+        assert_eq!(c.touch_move(&[(161.0, 150.0)], &G, 30.0), (vec![], None));
+        assert!(c.touch_end(&[], &G, 40.0).is_empty());
+        // 짧게 닿았다 취소 = 클릭 아님. 끌던 중 취소 = 왼쪽 버튼 놓기.
+        c.touch_start(&[(100.0, 100.0)], 1000.0);
+        assert!(c.touch_cancel().is_empty());
+        c.touch_start(&[(100.0, 75.0)], 2000.0);
+        c.touch_move(&[(200.0, 75.0)], &G, 2000.0 + LONG_PRESS_MS + 10.0);
+        assert_eq!(buttons(&c.touch_cancel()), [(MouseButton::Left, false)]);
+    }
+
+    #[test]
+    fn second_finger_after_scroll_can_pinch() {
+        let mut c = Converter {
+            direct: true,
+            ..Converter::new()
+        };
+        c.touch_start(&[(100.0, 200.0)], 0.0);
+        c.touch_move(&[(100.0, 150.0)], &G, 10.0);
+        c.touch_start(&[(100.0, 150.0), (140.0, 150.0)], 20.0);
+        let (_, p) = c.touch_move(&[(80.0, 150.0), (160.0, 150.0)], &G, 30.0);
+        assert!(p.is_some_and(|p| p.factor == 2.0));
+    }
+
+    #[test]
+    fn trackpad_tap_then_drag_holds_left_button() {
+        let mut c = Converter::new();
+        c.touch_start(&[(10.0, 10.0)], 0.0);
+        c.touch_end(&[], &G, 80.0);
+        c.touch_start(&[(10.0, 10.0)], 200.0);
+        let (out, _) = c.touch_move(&[(50.0, 10.0)], &G, 260.0);
+        assert_eq!(buttons(&out), [(MouseButton::Left, true)]);
+        assert_eq!(
+            buttons(&c.touch_end(&[], &G, 400.0)),
+            [(MouseButton::Left, false)]
+        );
+    }
+
+    #[test]
+    fn direct_touch_clicks_where_touched() {
+        let mut c = Converter {
+            direct: true,
+            ..Converter::new()
+        };
+        c.touch_start(&[(100.0, 75.0)], 0.0);
+        let out = c.touch_end(&[], &G, 80.0);
+        assert_eq!(last_move(&out), (0.25, 0.25));
+        assert_eq!(
+            buttons(&out),
+            [(MouseButton::Left, true), (MouseButton::Left, false)]
+        );
+        // 두 번째 탭이 4px 비켜 닿아도 첫 탭 자리로 — 더블클릭.
+        c.touch_start(&[(104.0, 78.0)], 200.0);
+        assert_eq!(last_move(&c.touch_end(&[], &G, 260.0)), (0.25, 0.25));
+        // 시간이 지나면 새 자리.
+        c.touch_start(&[(104.0, 78.0)], 2000.0);
+        assert_eq!(last_move(&c.touch_end(&[], &G, 2060.0)), (0.26, 0.26));
+        // 검은 띠 위 탭은 보내지 않는다.
+        let band = Geo {
+            ew: 400.0,
+            eh: 400.0,
+            vw: 400.0,
+            vh: 200.0,
+            ..Default::default()
+        };
+        c.touch_start(&[(200.0, 20.0)], 5000.0);
+        assert!(c.touch_end(&[], &band, 5050.0).is_empty());
+    }
+
+    #[test]
+    fn direct_touch_long_press_right_clicks_or_drags_and_drag_scrolls() {
+        let mut c = Converter {
+            direct: true,
+            ..Converter::new()
+        };
+        c.touch_start(&[(100.0, 75.0)], 0.0);
+        let out = c.touch_end(&[], &G, LONG_PRESS_MS + 10.0);
+        assert_eq!(
+            buttons(&out),
+            [(MouseButton::Right, true), (MouseButton::Right, false)]
+        );
+
+        c.touch_start(&[(100.0, 75.0)], 2000.0);
+        let (out, _) = c.touch_move(&[(200.0, 75.0)], &G, 2000.0 + LONG_PRESS_MS + 10.0);
+        assert_eq!(buttons(&out), [(MouseButton::Left, true)]);
+        assert_eq!(last_move(&out), (0.5, 0.25));
+        assert_eq!(
+            buttons(&c.touch_end(&[], &G, 3000.0)),
+            [(MouseButton::Left, false)]
+        );
+
+        // 바로 끌면 스크롤.
+        c.touch_start(&[(100.0, 200.0)], 4000.0);
+        let (out, _) = c.touch_move(&[(100.0, 100.0)], &G, 4050.0);
+        assert!(matches!(out[..], [Input::Wheel { dy, .. }] if dy == 100.0));
     }
 
     #[test]

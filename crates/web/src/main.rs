@@ -1,12 +1,15 @@
 //! 웹앱 — 화면·입력 변환·브라우저 WebRTC (04 「코드 구조」). 메시지는 `proto` 를 그대로 쓴다.
 mod api;
 mod errors;
+mod hangul;
 mod hub;
 mod input;
 mod list;
 mod measure;
 mod remote;
 mod session;
+mod vkbd;
+mod zoom;
 
 use errors::Fail;
 use leptos::prelude::*;

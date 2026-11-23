@@ -221,6 +221,116 @@ test('폰에서 열면 앞 화면에 이어받기 안내, 폰의 탭은 가운�
   await phone.screenshot({ path: join(OUT, 'remote-390.png') });
 });
 
+/** 호스트가 받은 text·Backspace 를 메모장처럼 다시 쳐 본 글. */
+function replay(v) {
+  let out = '';
+  for (const i of v) {
+    if (i.t === 'text') out += i.text;
+    else if (i.t === 'key' && i.hid_usage === 0x2a && i.down) out = [...out].slice(0, -1).join('');
+  }
+  return out;
+}
+
+test('폰 가상 키보드: 한글 문장·Ctrl+C·F5 (SC-011)', async () => {
+  const sid = sessionOf(1);
+  const from = (await inputs(phone, sid)).length;
+  await phone.getByRole('button', { name: '가상 키보드' }).tap();
+  const kb = phone.getByRole('group', { name: '가상 키보드' });
+  await kb.waitFor();
+  const press = (name) => kb.getByRole('button', { name, exact: true }).tap();
+  await press('한글');
+  // 정답지: 두벌식으로 「안녕하세요 원격 테스트」를 치는 자모 순서.
+  for (const k of [...'ㅇㅏㄴㄴㅕㅇㅎㅏㅅㅔㅇㅛ', '띄어쓰기', ...'ㅇㅜㅓㄴㄱㅕㄱ', '띄어쓰기', ...'ㅌㅔㅅㅡㅌㅡ']) await press(k);
+  const typed = await eventually(async () => {
+    const v = (await inputs(phone, sid)).slice(from);
+    return replay(v) === '안녕하세요 원격 테스트' && v;
+  }, '한글 문장', 5000).catch(async () => assert.fail(replay((await inputs(phone, sid)).slice(from))));
+  assert.ok(typed);
+  await phone.screenshot({ path: join(OUT, 'remote-vkbd-ko-390.png') });
+  await snapshot(phone, 'remote-vkbd');
+
+  const mark = (await inputs(phone, sid)).length;
+  await phone.getByRole('button', { name: 'Ctrl' }).tap();
+  await press('ㅊ'); // c 자리 — Ctrl 을 잡았으면 글자 대신 C 키
+  await press('기능키');
+  await press('F5');
+  const keys = await eventually(async () => {
+    const v = (await inputs(phone, sid)).slice(mark).filter((i) => i.t === 'key');
+    return v.length >= 6 && v;
+  }, '단축키');
+  assert.deepEqual(
+    keys.map((i) => [i.hid_usage, i.down]),
+    [[HID.ctrl, true], [HID.c, true], [HID.c, false], [HID.ctrl, false], [0x3e, true], [0x3e, false]],
+  );
+
+  // 키보드를 열어도 막대·키가 폰 폭 안에 있고 누를 만한 크기다.
+  for (const b of await phone.locator('.vk, .keys .key').all()) {
+    const r = await b.boundingBox();
+    assert.ok(r.x >= 0 && r.x + r.width <= 390 && r.height >= 34, `${await b.textContent()}: ${JSON.stringify(r)}`);
+  }
+  const stage = await phone.locator('.stage').boundingBox();
+  const vk = await kb.boundingBox();
+  assert.ok(stage.y + stage.height <= vk.y, '키보드가 화면을 가리지 않는다');
+  await phone.screenshot({ path: join(OUT, 'remote-vkbd-390.png') });
+  await phone.getByRole('button', { name: '가상 키보드' }).tap();
+  await kb.waitFor({ state: 'detached' });
+});
+
+test('가상 키보드 → 폰 자판으로 바꿔 쳐도 호스트 글이 지워지지 않는다', async () => {
+  const sid = sessionOf(1);
+  const from = (await inputs(phone, sid)).length;
+  await phone.getByRole('button', { name: '가상 키보드' }).tap();
+  const kb = phone.getByRole('group', { name: '가상 키보드' });
+  for (const k of 'ab') await kb.getByRole('button', { name: k, exact: true }).tap();
+  await phone.getByRole('button', { name: '더 보기' }).tap();
+  await phone.getByRole('button', { name: /폰 자판 열기/ }).tap();
+  await kb.waitFor({ state: 'detached' });
+  await phone.keyboard.insertText('d');
+  const v = await eventually(async () => {
+    const v = (await inputs(phone, sid)).slice(from);
+    return v.some((i) => i.t === 'text' && i.text === 'd') && v;
+  }, '폰 자판 글');
+  assert.equal(replay(v), 'abd');
+});
+
+test('폰 집기 확대 뒤 직접 터치 탭이 확대된 화면의 그 자리를 누른다', async () => {
+  const sid = sessionOf(1);
+  const st = await phone.locator('.stage').boundingBox();
+  const [cx, cy] = [st.x + st.width / 2, st.y + st.height / 2];
+  const cdp = await phone.context().newCDPSession(phone);
+  const two = (d) => [{ x: cx - d, y: cy, id: 0 }, { x: cx + d, y: cy, id: 1 }];
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: two(20) });
+  for (const d of [40, 60, 80, 100]) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: two(d) });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await phone.getByRole('button', { name: /배 · 원래대로/ }).waitFor();
+  const scale = await phone.evaluate(() => new DOMMatrix(getComputedStyle(document.querySelector('video')).transform).a);
+  assert.ok(scale > 4, `확대 ${scale}`);
+
+  await phone.getByRole('button', { name: '더 보기' }).tap();
+  await phone.getByRole('button', { name: '직접 터치' }).tap();
+  const mark = (await inputs(phone, sid)).length;
+  const [px, py] = [cx + 30, cy + 12];
+  // 기대값은 브라우저가 그린 영상 자리(getBoundingClientRect — 확대 반영)에서 따로 계산한다.
+  const want = await phone.evaluate(([px, py]) => {
+    const v = document.querySelector('video');
+    const r = v.getBoundingClientRect();
+    const k = Math.min(r.width / v.videoWidth, r.height / v.videoHeight);
+    const [cw, ch] = [v.videoWidth * k, v.videoHeight * k];
+    return [(px - r.left - (r.width - cw) / 2) / cw, (py - r.top - (r.height - ch) / 2) / ch];
+  }, [px, py]);
+  await phone.touchscreen.tap(px, py);
+  const v = await eventually(async () => {
+    const v = (await inputs(phone, sid)).slice(mark);
+    return v.some((i) => i.t === 'mouse_button' && !i.down) && v;
+  }, '직접 터치 탭');
+  const mv = v.find((i) => i.t === 'mouse_move');
+  assert.ok(Math.abs(mv.x - want[0]) < 0.002 && Math.abs(mv.y - want[1]) < 0.002, `${JSON.stringify(mv)} 기대 ${want}`);
+  assert.ok(mv.x < 0.55, '확대를 빼고 계산하면 0.58 — 확대가 좌표에 반영됐다');
+  await phone.screenshot({ path: join(OUT, 'remote-zoom-390.png') });
+  await phone.getByRole('button', { name: /배 · 원래대로/ }).tap();
+  await phone.getByRole('button', { name: /배 · 원래대로/ }).waitFor({ state: 'detached' });
+});
+
 test('끊기 → 에이전트에 viewer_closed, 목록으로', async () => {
   await phone.getByRole('button', { name: '끊기' }).click();
   await phone.getByRole('heading', { name: '내 기기' }).waitFor();
@@ -230,8 +340,8 @@ test('끊기 → 에이전트에 viewer_closed, 목록으로', async () => {
   );
 });
 
-test('ui-check: 빈 목록·목록·기기 추가 (1440·390)', { skip: !existsSync(UI_CHECK) && 'ui-check 없음' }, () => {
-  for (const name of ['list-empty', 'list', 'add']) {
+test('ui-check: 빈 목록·목록·기기 추가·가상 키보드 (1440·390)', { skip: !existsSync(UI_CHECK) && 'ui-check 없음' }, () => {
+  for (const name of ['list-empty', 'list', 'add', 'remote-vkbd']) {
     try {
       const out = execFileSync('node', [UI_CHECK, join(OUT, `${name}.html`), '--out', join(OUT, 'shots')], { encoding: 'utf8' });
       assert.match(out, /ui-check passed/, out);

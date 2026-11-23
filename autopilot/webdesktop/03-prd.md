@@ -28,7 +28,7 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | FR-004 | 목록에서 기기를 누르면 원격 화면 세션을 연다. 직접 연결 우선, 실패 시 Cloudflare TURN. 화면에 경로(직접/중계) 표시 | P0 | US-1, DL-5 |
 | FR-005 | 호스트는 화면을 H.264(레벨 H264_MAX_LEVEL 이하)로 보내고 긴 변이 VIDEO_MAX_EDGE 를 넘으면 줄인다. 망 대역폭 추정에 따라 비트레이트를 바꾼다 | P0 | B13 |
 | FR-006 | 데스크톱 브라우저 입력: 마우스(이동·클릭·휠)·키보드. 전체 화면에서 Keyboard Lock 으로 Win/Cmd·Alt+Tab 전달, 안 되는 키는 특수키 막대 | P0 | US-3, B14 |
-| FR-007 | 터치 입력(iPhone·Android): 트랙패드 방식(한 손가락 이동, 탭=클릭, 두 손가락 탭=오른쪽, 두 손가락 끌기=스크롤, 집기=화면 확대) + 특수키 막대(Ctrl·Alt·Cmd·Win·Esc·Tab·방향키) + 한글을 포함한 완성 글자 입력 | P0 | US-1, R5·R6 |
+| FR-007 | 터치 입력(iPhone·Android·iPad): 조작 방식 두 가지 — 트랙패드(한 손가락 이동, 탭=클릭, 탭 후 끌기=끌기, 두 손가락 탭=오른쪽, 두 손가락 끌기=스크롤)·직접 터치(탭=그 자리 클릭, 길게=오른쪽, 길게 누른 뒤 끌기=끌기, 한 손가락 끌기=스크롤). 두 방식 모두 집기=화면 확대(트랙패드는 커서를 따라감). 특수키 막대(Ctrl·Alt·Win·Esc·Tab·Del) + 자체 가상 키보드(F1~F12·방향·Home/End·한글 두벌식 조합) + 시스템 자판으로 완성 글자 입력 | P0 | US-1, R5·R6, research/touch-control.md |
 | FR-008 | Windows 무인 접속: 잠금 화면·로그인 화면·UAC 창을 캡처하고 입력할 수 있다(Ctrl+Alt+Del 포함) | P0 | US-1, R1, B11 |
 | FR-009 | macOS 호스트: 첫 실행 때 화면 기록·손쉬운 사용·로컬 네트워크 권한 안내 화면, 권한이 빠지면 목록에 「권한 필요」(어느 권한인지). Jump 의 무인 접속용 「Remote Desktop」 항목은 서드파티가 얻을 수 있는지 미확인이라 넣지 않음(02 R14 — 월간 재승인이 생기면 그때 검토) | P0 | R14 |
 | FR-010 | 망 끊김·와이파이↔LTE 전환 시 자동 재연결. 순서: ① ICE 재시작 ② RECONNECT_MAX_SEC 안에 화면이 안 돌아오면 새 세션을 자동으로 1회 ③ 그것도 실패하면 「다시 연결」 버튼. 목표: ①에서 RECONNECT_MAX_SEC 안 복귀 | P0 | R8 |
@@ -156,6 +156,11 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | TAP_MAX_MS | 250 | ms (터치를 탭=클릭으로 보는 최대 시간) | 설계 결정 DL-16 (iPhone 실기기 C8 뒤 조정) |
 | TAP_SLOP_PX | 10 | px (탭으로 보는 최대 손가락 이동) | 설계 결정 DL-16 |
 | TRACKPAD_GAIN | 1.5 | 배 (손가락이 영상 폭만큼 움직이면 커서는 1.5배) | 설계 결정 DL-16 |
+| LONG_PRESS_MS | 500 | ms (직접 터치에서 길게 누르기 = 오른쪽 클릭·끌기 시작) | 출처 iOS UILongPressGestureRecognizer 기본값 0.5초 (research/touch-control.md) |
+| DOUBLE_TAP_MS | 300 | ms (두 번째 탭을 첫 탭 자리에 붙이는·탭 후 끌기로 보는 간격) | 설계 결정 DL-17 |
+| ZOOM_MAX | 6 | 배 (집기 확대 상한 — 폰 세로에서 1920 폭 PC 를 1:1 보다 조금 더) | 설계 결정 DL-17 |
+| PAN_EDGE_PCT | 15 | % (확대 중 커서가 화면 가장자리 이 폭 안에 들면 화면이 따라감) | 설계 결정 DL-17 |
+| TABLET_MIN_PX | 600 | CSS px (화면 짧은 변이 이 이상이면 태블릿 — 기본 조작 방식 = 직접 터치) | 출처 Android sw600dp (research/touch-control.md) |
 | VIEWER_WS_RETRY_SEC | 2 | 초 (뷰어 허브 WS 가 끊긴 뒤 다시 붙기 전 대기, 웹앱 `hub.rs` RETRY_MS) | 설계 결정 DL-16 |
 | VIEWER_STATS_EVERY_SEC | 60 | 초 (M-10 계측을 다시 보내는 주기, `session.rs` REPORT_EVERY_MS) | 06 SC-003 측정법 「1분」 |
 | INPUT_BUFFER_KEEP | 64 | 글자 (숨은 입력칸을 비우는 길이, `remote.rs` TEXT_KEEP) | 설계 결정 DL-16 |

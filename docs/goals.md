@@ -30,17 +30,20 @@
 - **사용자 원문 (2026-11-23):**
   - "Window PC <-> Mac book <-> iPhone <-> Android 간 호환이 자유로웠으면 좋겠어"
   - "아이폰 때문에 웹앱에서 접근해서 제어하고 싶어 앱스토어 심사 받는게 쉽지 않잖아"
+  - "스마트폰이나 아이패드에서 조작할때 각각 화면 해상도에서 pc를 제어 한다는 전제에서 굉장히 차이가 많이 나서 불편할거 같은데 … 시스템 키보드가 아닌 가상 키보드도 구현해서 사용하는데 불편하지 않을 수 있도록"
 - **조사:**
   - iPhone 은 OS 가 막아 호스트가 될 수 없습니다 — https://rustdesk.com/blog/rustdesk-remote-control-android-ios
   - iPhone 에서 우리 VPN 앱을 쓰려면 법인 개발자 계정이 필요합니다(지침 5.4) — https://developer.apple.com/forums/thread/747574
   - Safari 26.4 부터 WebTransport 와 Keyboard Lock 을 지원합니다 — https://webkit.org/?p=17862
   - Jump Desktop 도 WebRTC 위에 만들었습니다 — https://JumpDesktop.com/docs/JumpDesktopTeamsSecurityPaper.pdf 와 research/local-inspection.md J1 이 일치합니다.
+  - 폰 세로(390px)에서 1920 폭 PC 는 0.2배로 보여 글자 2.4px·단추 3px 입니다. 확대 없이는 못 씁니다. 다른 제품은 두 조작 방식(트랙패드·직접 터치)과 집기 확대, 가장자리 따라가기를 씁니다 — research/touch-control.md.
   - 가장 가까운 Tailscale 중계는 도쿄 39.5ms 입니다(이 PC 실측 T3). Cloudflare TURN 은 애니캐스트입니다(가장 가까운 거점으로 연결).
 - **세운 목표:**
   - 모든 뷰어는 같은 웹앱 하나를 씁니다: iPhone·Android·다른 PC 브라우저.
   - 호스트는 Windows·Mac 두 가지입니다.
   - 잠긴 Windows 까지 열 수 있어야 합니다.
   - LTE 에서도 쓸 만해야 합니다: 첫 화면 5초 안, 입력 지연 p50 150ms 이하.
+  - 폰·태블릿에서 PC 화면을 불편 없이 다룹니다: 조작 방식 두 가지(트랙패드·직접 터치, 기기 크기로 기본값), 집기 확대와 커서 따라가기, 자체 가상 키보드(F키·방향키·단축키·한글 두벌식).
 - **원문과 달라진 점:**
   - 「4개 OS 상호 호환」을 「4개 OS 에서 보기 + 2개 OS 가 호스트」로 좁혔습니다. iOS 는 OS 제약으로 호스트가 될 수 없고, Android 호스트는 사용자가 뺐습니다(Q4).
   - 「잠긴 PC 열기」를 더했습니다. 무인 접속이 안 되면 밖에서 쓸 수 없기 때문입니다(사전 부검 P2).
@@ -53,6 +56,7 @@
 | SC-004 잠긴 Windows 해제 | 수동 시험 + 장면 기록 | 잼 수단 없음 |
 | SC-005 망 전환 재연결 | 뷰어 계측 M-10 → `tools/report.py` | 잼 수단 없음 |
 | SC-006 iPhone 한글 입력 | 호스트 클립보드 회수 비교 | 잼 수단 없음 |
+| SC-011 폰 390px 에서 PC 16px 단추를 확대해 44pt 이상으로 누르고, 가상 키보드로 「안녕하세요 원격 테스트」·Ctrl+C·F5 를 보낸다 | `tools/web.test.mjs` 폰 시험(입력 채널 비교) | 브라우저 시험 통과(실기기 iPhone·iPad 시험 전) |
 
 - **정답지 출처:** 원격 데스크톱 지연의 공개 기준 값은 찾지 못했습니다(Jump Desktop 도 ms 를 공개하지 않음). 그래서 150ms 는 설계 결정(DL-8)입니다. 첫 시제품 실측 뒤 조정합니다.
 

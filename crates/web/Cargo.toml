@@ -26,5 +26,5 @@ features = [
   "RtcSessionDescriptionInit", "RtcIceCandidateInit", "RtcPeerConnectionIceEvent", "RtcIceCandidate",
   "RtcIceConnectionState", "RtcTrackEvent", "RtcDataChannel", "RtcDataChannelState",
   "MediaStream", "MediaStreamTrack", "HtmlVideoElement", "HtmlMediaElement", "HtmlTextAreaElement", "HtmlElement", "Element", "DomRect",
-  "KeyboardEvent", "MouseEvent", "WheelEvent", "TouchEvent", "TouchList", "Touch", "FocusOptions",
+  "KeyboardEvent", "MouseEvent", "WheelEvent", "TouchEvent", "TouchList", "Touch", "FocusOptions", "PointerEvent",
 ]

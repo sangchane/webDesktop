@@ -1,6 +1,9 @@
-//! 원격 화면 — 영상·입력 변환 연결·특수키 막대(FR-006·007). 연결과 계측은 `session`.
-use crate::input::{self, Converter};
+//! 원격 화면 — 영상·입력 변환 연결·확대·특수키 막대·가상 키보드(FR-006·007). 연결과 계측은 `session`.
+use crate::hangul::{self, Hangul};
+use crate::input::{self, Converter, Geo};
 use crate::session::{self, Phase, Ui};
+use crate::vkbd::{Act, VKbd};
+use crate::zoom::Zoom;
 use crate::{AppState, Screen};
 use leptos::{html, prelude::*};
 use proto::{Device, Input, MouseButton, NetPath};
@@ -9,6 +12,9 @@ use web_sys::{FocusOptions, MouseEvent, TouchEvent, WheelEvent};
 
 /// 입력칸을 비우는 길이 — 비교할 글을 짧게 둔다.
 const TEXT_KEEP: usize = 64;
+/// 03 상수 표 — 화면 짧은 변이 이 이상이면 태블릿(기본 직접 터치).
+const TABLET_MIN_PX: f64 = 600.0;
+const MODE_KEY: &str = "webdesktop.touch";
 
 #[derive(Default)]
 struct Kbd {
@@ -18,14 +24,72 @@ struct Kbd {
     down: Vec<u16>,
     /// 누른 채인 마우스 버튼 — 화면 밖에서 떼도 원격에 눌린 채 남지 않게.
     buttons: Vec<MouseButton>,
+    /// 가상 키보드로 친 글(한글 조합 포함).
+    han: Hangul,
 }
 
 impl Kbd {
-    /// 입력칸 비교를 새로 시작한다(원격 커서를 옮긴 뒤 자동 고침이 엉뚱한 글자를 지우지 않게).
+    /// 글 비교를 새로 시작한다(원격 커서를 옮긴 뒤 자동 고침·조합이 엉뚱한 글자를 지우지 않게).
     fn reset_text(&mut self, kb: &web_sys::HtmlTextAreaElement) {
         if !self.composing {
             kb.set_value("");
             self.conv.text_reset();
+            self.han.clear();
+        }
+    }
+
+    /// 가상 키보드 글을 버리고 비교를 새로 시작한다(시스템 자판·실제 키보드로 넘어갈 때).
+    fn leave_vk(&mut self) {
+        if !self.han.buf.is_empty() {
+            self.han.clear();
+            self.conv.text_reset();
+        }
+    }
+
+    /// 가상 키보드 키 하나.
+    fn vkey(&mut self, a: Act) -> Vec<Input> {
+        match a {
+            // Ctrl 을 잡은 채 지우기 = Ctrl+Backspace 한 번(조합 중 글을 비교로 고치지 않는다).
+            Act::Backspace if !self.conv.latched().is_empty() => {
+                self.han.clear();
+                self.conv.text_reset();
+                self.conv.tap_key(input::HID_BACKSPACE)
+            }
+            Act::Commit => {
+                self.han.commit();
+                vec![]
+            }
+            // Ctrl·Alt·Win 을 잡았으면 글자 대신 그 자리 키로(Ctrl+C).
+            Act::Char { hid, shift, .. } if !self.conv.latched().is_empty() => {
+                self.han.clear();
+                self.conv.text_reset();
+                let mut out = vec![];
+                if shift && !self.conv.latched().contains(&input::HID_SHIFT) {
+                    out.extend(self.conv.toggle_mod(input::HID_SHIFT));
+                }
+                out.extend(self.conv.tap_key(hid));
+                out
+            }
+            Act::Char { ch, .. } => {
+                if hangul::is_jamo(ch) {
+                    self.han.push_jamo(ch);
+                } else {
+                    self.han.push_char(ch);
+                }
+                let out = self.conv.text(&self.han.buf);
+                if ch == ' ' && self.han.buf.chars().count() > TEXT_KEEP {
+                    self.han.clear();
+                    self.conv.text_reset();
+                }
+                out
+            }
+            Act::Backspace if self.han.backspace() => self.conv.text(&self.han.buf),
+            Act::Backspace => self.conv.tap_key(input::HID_BACKSPACE),
+            Act::Key(h) => {
+                self.han.clear();
+                self.conv.text_reset();
+                self.conv.tap_key(h)
+            }
         }
     }
 }
@@ -40,6 +104,33 @@ fn with<R>(f: impl FnOnce(&mut Kbd) -> R) -> R {
 
 fn send(v: Vec<Input>) {
     session::send(v);
+}
+
+/// `with` 안에서 만든 입력을 보내고 나머지 값을 돌려준다.
+fn send_and<R>(f: impl FnOnce(&mut Kbd) -> (Vec<Input>, R)) -> R {
+    let (v, r) = with(f);
+    send(v);
+    r
+}
+
+/// 저장한 조작 방식. 없으면 태블릿은 직접 터치, 폰은 트랙패드(research/touch-control.md).
+fn direct_default() -> bool {
+    let w = crate::api::window();
+    let saved = w
+        .local_storage()
+        .ok()
+        .flatten()
+        .and_then(|s| s.get_item(MODE_KEY).ok().flatten());
+    match saved.as_deref() {
+        Some("direct") => true,
+        Some("trackpad") => false,
+        _ => {
+            let px = |v: Result<wasm_bindgen::JsValue, _>| {
+                v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+            };
+            px(w.inner_width()).min(px(w.inner_height())) >= TABLET_MIN_PX
+        }
+    }
 }
 
 const BAR: [(&str, u16, bool); 6] = [
@@ -59,14 +150,20 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
         path: RwSignal::new(None),
     };
     let video = NodeRef::<html::Video>::new();
+    let stage = NodeRef::<html::Div>::new();
     let kb = NodeRef::<html::Textarea>::new();
     let cursor = RwSignal::new(None::<(f64, f64)>);
     let latched = RwSignal::new(Vec::<u16>::new());
+    let zoom = RwSignal::new(Zoom::default());
+    let direct = RwSignal::new(direct_default());
+    let vk_open = RwSignal::new(false);
     // 터치 기기에서 첫 터치 전까지 손짓 안내를 보인다.
     let hint = RwSignal::new(crate::api::window().navigator().max_touch_points() > 0);
     KBD.with(|k| {
+        let mut conv = Converter::new();
+        conv.direct = direct.get_untracked();
         *k.borrow_mut() = Kbd {
-            conv: Converter::new(),
+            conv,
             ..Default::default()
         }
     });
@@ -82,25 +179,43 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
         let _ = v.set_attribute("playsinline", "");
         leptos::task::spawn_local(session::open(id, t0, v, ui));
     });
-    on_cleanup(session::close);
+    // 화면을 떠날 때 끌던 버튼·잡은 수정키를 놓고 닫는다.
+    // shortcut: 채널이 이미 끊겼으면 이 놓기가 안 간다 — 에이전트가 채널 닫힘에 모두 놓아야 한다(T9).
+    on_cleanup(|| {
+        send(with(|k| {
+            let mut v = k.conv.release_all();
+            for b in std::mem::take(&mut k.buttons) {
+                v.extend(k.conv.mouse_button(b, false));
+            }
+            v
+        }));
+        session::close();
+    });
 
-    // 영상 요소 안 좌표와 크기, 영상 원본 크기.
+    // 무대의 화면 위치·크기. 확대는 영상에만 걸려 무대는 그대로다.
+    let stage_box = move || {
+        let r = stage.get_untracked()?.get_bounding_client_rect();
+        Some((r.left(), r.top(), r.width(), r.height()))
+    };
+    // 무대 안 영상 자리(확대 반영). 무대가 줄었으면(키보드·화면 돌림) 확대를 다시 가둔다.
     let geo = move || {
-        let v = video.get()?;
-        let r = v.get_bounding_client_rect();
-        Some((
-            r.left(),
-            r.top(),
-            r.width(),
-            r.height(),
-            v.video_width() as f64,
-            v.video_height() as f64,
-        ))
+        let (_, _, w, h) = stage_box()?;
+        let v = video.get_untracked()?;
+        let mut z = zoom.get_untracked();
+        if z.clamp((w, h)) {
+            zoom.set(z);
+        }
+        Some(Geo {
+            x0: z.tx,
+            y0: z.ty,
+            ew: w * z.s,
+            eh: h * z.s,
+            vw: v.video_width() as f64,
+            vh: v.video_height() as f64,
+        })
     };
-    let unit = move |cx: i32, cy: i32| {
-        let (l, t, w, h, vw, vh) = geo()?;
-        input::to_unit(cx as f64 - l, cy as f64 - t, w, h, vw, vh)
-    };
+    let local = move |cx: f64, cy: f64| stage_box().map(|(l, t, ..)| (cx - l, cy - t));
+    let unit = move |cx: i32, cy: i32| geo()?.unit(local(cx as f64, cy as f64)?);
     let focus_kb = move || {
         if let Some(k) = kb.get() {
             let o = FocusOptions::new();
@@ -160,7 +275,7 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
         // deltaMode 1 = 줄, 2 = 쪽 → px.
         let k = match e.delta_mode() {
             1 => 16.0,
-            2 => geo().map_or(800.0, |g| g.3),
+            2 => stage_box().map_or(800.0, |b| b.3),
             _ => 1.0,
         };
         send(vec![with(|c| {
@@ -169,45 +284,63 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
         })]);
     };
 
-    // 터치 = 트랙패드. 커서는 뷰어가 그린다.
+    // 터치 — 트랙패드(커서는 뷰어가 그림) 또는 직접 터치. 좌표는 무대 px.
     let points = move |list: web_sys::TouchList| {
-        let Some((l, t, ..)) = geo() else {
-            return vec![];
-        };
         (0..list.length())
             .filter_map(|i| list.item(i))
-            .map(|p| (p.client_x() as f64 - l, p.client_y() as f64 - t))
+            .filter_map(|p| local(p.client_x() as f64, p.client_y() as f64))
             .collect::<Vec<_>>()
-    };
-    let content = move || {
-        let (_, _, w, h, vw, vh) = geo()?;
-        let a = input::from_unit((0.0, 0.0), w, h, vw, vh)?;
-        let b = input::from_unit((1.0, 1.0), w, h, vw, vh)?;
-        Some(((b.0 - a.0), (b.1 - a.1), w, h, vw, vh))
     };
     let show_cursor = move || {
         let c = with(|k| k.conv.cursor);
-        cursor.set(content().and_then(|(_, _, w, h, vw, vh)| input::from_unit(c, w, h, vw, vh)));
+        cursor.set(
+            (!direct.get_untracked())
+                .then(geo)
+                .flatten()
+                .and_then(|g| g.stage(c)),
+        );
+    };
+    // 트랙패드: 확대 중이면 커서를 따라 화면을 민다.
+    let follow = move || {
+        if direct.get_untracked() {
+            return;
+        }
+        let c = with(|k| k.conv.cursor);
+        if let (Some(p), Some((.., w, h))) = (geo().and_then(|g| g.stage(c)), stage_box()) {
+            zoom.update(|z| z.follow(p, (w, h)));
+        }
+        show_cursor();
     };
     let on_tstart = move |e: TouchEvent| {
         e.prevent_default();
         hint.set(false);
-        let pts = points(e.touches());
+        let pts = points(e.target_touches());
         with(|k| k.conv.touch_start(&pts, e.time_stamp()));
         show_cursor();
     };
     let on_tmove = move |e: TouchEvent| {
         e.prevent_default();
-        let pts = points(e.touches());
-        let view = content().map_or((0.0, 0.0), |c| (c.0, c.1));
-        send(with(|k| k.conv.touch_move(&pts, view)));
-        show_cursor();
+        let pts = points(e.target_touches());
+        let g = geo().unwrap_or_default();
+        let (out, pinch) = with(|k| k.conv.touch_move(&pts, &g, e.time_stamp()));
+        let moved = out.iter().any(|i| matches!(i, Input::MouseMove { .. }));
+        send(out);
+        if let (Some(p), Some((.., w, h))) = (pinch, stage_box()) {
+            zoom.update(|z| z.pinch(p.factor, p.center, p.pan, (w, h)));
+        }
+        // 커서가 움직였을 때만 따라간다 — 집기로 다른 곳을 보는 것을 되돌리지 않게.
+        if moved {
+            follow();
+        } else {
+            show_cursor();
+        }
     };
     let on_tend = move |e: TouchEvent| {
         e.prevent_default();
-        let pts = points(e.touches());
+        let pts = points(e.target_touches());
+        let g = geo().unwrap_or_default();
         send(with(|k| {
-            let out = k.conv.touch_end(&pts, e.time_stamp());
+            let out = k.conv.touch_end(&pts, &g, e.time_stamp());
             if let (true, Some(kb)) = (!out.is_empty(), kb.get()) {
                 k.reset_text(&kb);
             }
@@ -228,6 +361,7 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
         };
         e.prevent_default();
         send(with(|s| {
+            s.leave_vk();
             // 길게 눌러 반복되는 keydown 은 한 번만 적는다(keyup 짝이 하나라서).
             if !e.repeat() || !s.down.contains(&hid) {
                 s.down.push(hid);
@@ -255,12 +389,59 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
     let sync_text = move || {
         let Some(k) = kb.get() else { return };
         let value = k.value();
-        send(with(|s| s.conv.text(&value)));
-        if value.contains('\n') || value.chars().count() > TEXT_KEEP {
+        let shortcut = send_and(|s| {
+            s.leave_vk();
+            let shortcut = !s.conv.latched().is_empty();
+            (s.conv.text(&value), shortcut)
+        });
+        // 잡은 수정키로 보낸 글자는 호스트 글이 아니다 — 비교를 새로 시작한다.
+        if shortcut || value.contains('\n') || value.chars().count() > TEXT_KEEP {
             k.set_value("");
             with(|s| s.conv.text_reset());
         }
         latched.set(with(|s| s.conv.latched().to_vec()));
+    };
+
+    // 가상 키보드 — 시스템 자판 입력칸에 남은 글이 있으면 비교를 새로 시작한다.
+    let on_vkey = Callback::new(move |a: Act| {
+        send(with(|s| {
+            if let Some(k) = kb.get_untracked().filter(|k| !k.value().is_empty()) {
+                k.set_value("");
+                s.conv.text_reset();
+            }
+            s.vkey(a)
+        }));
+        latched.set(with(|k| k.conv.latched().to_vec()));
+    });
+    // 키보드가 열리고 닫히면 무대 크기가 바뀐다 — 그려진 뒤 확대를 가두고 커서를 따라간다.
+    let refit = move || {
+        request_animation_frame(move || {
+            if let Some((.., w, h)) = stage_box() {
+                zoom.update(|z| {
+                    z.clamp((w, h));
+                });
+            }
+            follow();
+        })
+    };
+    let toggle_vk = move || {
+        let open = !vk_open.get_untracked();
+        vk_open.set(open);
+        if open {
+            // 시스템 자판을 닫는다.
+            if let Some(k) = kb.get_untracked() {
+                let _ = k.blur();
+            }
+        }
+        refit();
+    };
+    let set_mode = move |d: bool| {
+        direct.set(d);
+        with(|k| k.conv.direct = d);
+        if let Ok(Some(s)) = crate::api::window().local_storage() {
+            let _ = s.set_item(MODE_KEY, if d { "direct" } else { "trackpad" });
+        }
+        show_cursor();
     };
 
     let bar = BAR
@@ -271,6 +452,8 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
                     if is_mod {
                         k.conv.toggle_mod(hid)
                     } else {
+                        k.han.clear();
+                        k.conv.text_reset();
                         k.conv.tap_key(hid)
                     }
                 }));
@@ -316,11 +499,27 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
             .into_any(),
         ),
     };
+    let hint_text = move || {
+        if direct.get() {
+            "탭 = 그 자리 클릭 · 길게 = 오른쪽 클릭 · 길게 누른 뒤 끌기 = 끌기 · 끌기 = 스크롤 · 두 손가락 = 확대·이동"
+        } else {
+            "한 손가락 끌기 = 커서 이동 · 탭 = 클릭 · 탭 후 끌기 = 끌기 · 두 손가락 탭 = 오른쪽 클릭 · 두 손가락 끌기 = 스크롤 · 벌리기 = 확대"
+        }
+    };
+    let mode_btn = move |d: bool, label: &'static str| {
+        view! {
+            <button class="item" class:on=move || direct.get() == d aria-pressed=move || (direct.get() == d).to_string()
+                popovertarget="more" popovertargetaction="hide" on:click=move |_| set_mode(d)>
+                {label}
+            </button>
+        }
+    };
 
     view! {
-        <main class="remote">
+        <main class="remote" class:kbd-open=vk_open>
             <div
                 class="stage"
+                node_ref=stage
                 on:mousemove=on_move
                 on:mousedown=on_down
                 on:mouseup=on_up
@@ -330,9 +529,13 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
                 on:touchstart=on_tstart
                 on:touchmove=on_tmove
                 on:touchend=on_tend
-                on:touchcancel=on_tend
+                on:touchcancel=move |e: TouchEvent| {
+                    e.prevent_default();
+                    send(with(|k| k.conv.touch_cancel()));
+                    latched.set(with(|k| k.conv.latched().to_vec()));
+                }
             >
-                <video node_ref=video></video>
+                <video node_ref=video style=move || zoom.get().css()></video>
                 {move || cursor.get().map(|(x, y)| view! {
                     <span class="cursor" style=format!("transform: translate({x}px, {y}px)")></span>
                 })}
@@ -342,10 +545,16 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
                     </span>
                 })}
                 {move || (hint.get() && ui.phase.get() == Phase::Live).then(|| view! {
-                    <p class="hint">"한 손가락 끌기 = 커서 이동 · 탭 = 클릭 · 두 손가락 탭 = 오른쪽 클릭 · 두 손가락 끌기 = 스크롤"</p>
+                    <p class="hint">{hint_text}</p>
                 })}
                 {status}
             </div>
+            // 무대 밖에 둔다 — 무대의 터치 처리가 누름을 막지 않게.
+            {move || zoom.get().zoomed().then(|| view! {
+                <button class="zoom" on:click=move |_| { zoom.set(Zoom::default()); show_cursor(); }>
+                    {format!("{:.1}배 · 원래대로", zoom.get().s)}
+                </button>
+            })}
             <textarea
                 class="kb"
                 node_ref=kb
@@ -365,10 +574,21 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
                 on:input=move |_| if !with(|s| s.composing) { sync_text() }
             ></textarea>
             <nav class="keys" aria-label="특수키">
+                <button class="key" class:on=vk_open aria-label="가상 키보드" aria-pressed=move || vk_open.get().to_string()
+                    on:click=move |_| toggle_vk()>"자판"</button>
                 {bar}
-                <button class="key" aria-label="키보드" on:click=move |_| focus_kb()>"자판"</button>
+                <button class="key" aria-label="더 보기" popovertarget="more">"⋯"</button>
                 <button class="key end" on:click=move |_| { session::close(); st.screen.set(Screen::List); }>"끊기"</button>
             </nav>
+            {move || vk_open.get().then(|| view! { <VKbd on=on_vkey/> })}
+            <div id="more" class="menu" popover="auto">
+                <p class="muted">"조작 방식"</p>
+                <div class="pair">{mode_btn(false, "트랙패드")}{mode_btn(true, "직접 터치")}</div>
+                <button class="item" popovertarget="more" popovertargetaction="hide" on:click=move |_| {
+                    if vk_open.get_untracked() { toggle_vk(); }
+                    focus_kb();
+                }>"폰 자판 열기(받아쓰기·밀어 쓰기)"</button>
+            </div>
         </main>
     }
 }
