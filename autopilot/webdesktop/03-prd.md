@@ -153,6 +153,13 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | INSTALL_LINK_TTL_MIN | 10 | 분 (설치 파일 1회용 링크 — REG_CODE_TTL_MIN 과 같은 수명) | 설계 결정 DL-9 |
 | OFFLINE_DETECT_SEC | 90 | 초 (앱 메시지·자동 응답이 이만큼 없으면 오프라인) | 설계 결정 DL-9 |
 | PITR_DAYS | 30 | 일 | 출처 https://developers.cloudflare.com/durable-objects/api/storage-api/ (SQLite DO 시점 복구) |
+| TAP_MAX_MS | 250 | ms (터치를 탭=클릭으로 보는 최대 시간) | 설계 결정 DL-16 (iPhone 실기기 C8 뒤 조정) |
+| TAP_SLOP_PX | 10 | px (탭으로 보는 최대 손가락 이동) | 설계 결정 DL-16 |
+| TRACKPAD_GAIN | 1.5 | 배 (손가락이 영상 폭만큼 움직이면 커서는 1.5배) | 설계 결정 DL-16 |
+| VIEWER_WS_RETRY_SEC | 2 | 초 (뷰어 허브 WS 가 끊긴 뒤 다시 붙기 전 대기, 웹앱 `hub.rs` RETRY_MS) | 설계 결정 DL-16 |
+| VIEWER_STATS_EVERY_SEC | 60 | 초 (M-10 계측을 다시 보내는 주기, `session.rs` REPORT_EVERY_MS) | 06 SC-003 측정법 「1분」 |
+| INPUT_BUFFER_KEEP | 64 | 글자 (숨은 입력칸을 비우는 길이, `remote.rs` TEXT_KEEP) | 설계 결정 DL-16 |
+| LATENCY_MATCH_KEEP | 256 | 칸 (지연 짝짓기에 기억하는 프레임·입력 수, 60fps 로 약 4초, `measure.rs` KEEP) | 설계 결정 DL-16 |
 
 ## 미결정
 0건

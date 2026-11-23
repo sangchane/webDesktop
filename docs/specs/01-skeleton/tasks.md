@@ -9,7 +9,7 @@
 | T4 | 허브 등록·설치 링크·기기 서명 WS·목록·오프라인 판정 + 마이그레이션 | `node --test tools/hub.test.mjs` 등록·서명 묶음 `# fail 0` | 예 (2026-11-23 15 통과·`# fail 0`, VERIFY OK, 리뷰 1회 — 중간 2·낮음 5 모두 고침. 설치 파일 자체(R2)는 T8 뒤 — 지금은 토큰 확인 뒤 not_found. 오프라인 판정은 자동 응답 시각 API(`getWebSocketAutoResponseTimestamp`)를 JS 로 불러 씀 → M-13 `agent.alive` 불필요) |
 | T5 | 허브 세션·신호 중계·TURN 자격·이어받기·viewer_stats | `node --test tools/hub.test.mjs` 세션 묶음 `# fail 0` | 예 (2026-11-23 23 통과·`# fail 0`(T5 묶음 8), VERIFY OK, 리뷰 1회 — 중간 1(재사용 때 session.start 다시 보냄)·시험 빈틈 2 고침, 낮음 A3(입장권을 업그레이드 확인 전에 씀)은 일반 HTTP 로 401 을 확인하려고 그대로 둠. 남은 빈칸: viewer_stats 저장 값 대조는 E-09 때, 운영 TURN 호출은 에이전트(T8) 붙은 뒤 첫 세션에서 확인) |
 | T6 | Access 확인(설정은 Aside 로 제가 함) | `node tools/check-access.mjs` → `ACCESS OK` | 예 (2026-11-23 ACCESS OK 4/4 — /agent/* 공개 확인은 T4 뒤 추가) |
-| T7 | 웹앱 목록·기기 추가·원격 화면·입력 변환기·계측 | `cargo test -p web` + `trunk build` + 화면 확인 스크립트 | 아니오 |
+| T7 | 웹앱 목록·기기 추가·원격 화면·입력 변환기·계측 | `cargo test -p web` + `trunk build` + 화면 확인 스크립트 `node --test tools/web.test.mjs` | 예 (2026-11-23 web 단위 19 통과, VERIFY OK, 화면 시험 7/7 — 실제 Chromium 뷰어 + 가짜 에이전트·가짜 호스트 탭: 기기 추가 코드로 등록 → 목록 자동 복귀 「켜짐」 → 영상·첫 프레임(로컬 약 300ms)·경로 direct 계측 → 클릭 가운데(0.5,0.5)·글자·한글 「안녕하세요 원격 테스트」·Enter·Esc·Ctrl+C → 폰 탭·이어받기 안내 → 끊기 viewer_closed, ui-check 1440·390 통과. 리뷰 1회(버그 12·계약 2 중 받은 것 고침) + 눈가린 점검 1회(목록·기기 추가·원격 화면 고침) — DL-16. 허브 시험 23 통과(빈도 묶음 분 경계 흔들림 고침). 안 본 것: 실제 에이전트(T9)·TURN 중계(T10)·입력 지연 실측(D-08 은 단위 시험)·iPhone 실기기(T11)) |
 | T8 | 에이전트: 키·등록·WS·재접속 | 로컬 허브에 등록 → 목록 온라인 | 아니오 |
 | T9 | 에이전트 세션: DXGI → openh264 → str0m, 입력 주입, input.applied | PC Chrome 으로 화면·클릭·타자(C6) | 아니오 |
 | T10 | 배포 + PC 브라우저 C5·C6·C7 | `node tools/report.mjs --last` | 아니오 |

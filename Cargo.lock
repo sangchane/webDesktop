@@ -1817,8 +1817,14 @@ dependencies = [
 name = "web"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "leptos",
  "proto",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

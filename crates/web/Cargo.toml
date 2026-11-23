@@ -6,6 +6,25 @@ license.workspace = true
 publish = false
 
 # 웹앱 — Rust → wasm(Leptos CSR), trunk 로 빌드 (decision-log DL-13).
+# WebRTC·입력·fetch 는 web-sys 로 직접 (SPEC 「웹앱도 Rust」 — 의존 최소).
 [dependencies]
 proto = { path = "../proto" }
 leptos = { version = "0.8", features = ["csr"] }
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "Window", "Document", "Location", "Storage", "Crypto", "Performance", "Navigator", "Clipboard",
+  "Headers", "Request", "RequestInit", "RequestRedirect", "Response", "ResponseType",
+  "WebSocket", "MessageEvent", "CloseEvent",
+  "RtcPeerConnection", "RtcConfiguration", "RtcRtpTransceiverInit", "RtcRtpTransceiver",
+  "RtcSessionDescriptionInit", "RtcIceCandidateInit", "RtcPeerConnectionIceEvent", "RtcIceCandidate",
+  "RtcIceConnectionState", "RtcTrackEvent", "RtcDataChannel", "RtcDataChannelState",
+  "MediaStream", "MediaStreamTrack", "HtmlVideoElement", "HtmlMediaElement", "HtmlTextAreaElement", "HtmlElement", "Element", "DomRect",
+  "KeyboardEvent", "MouseEvent", "WheelEvent", "TouchEvent", "TouchList", "Touch", "FocusOptions",
+]
