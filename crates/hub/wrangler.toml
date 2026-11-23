@@ -18,3 +18,8 @@ new_sqlite_classes = ["Hub"]
 
 [observability]
 enabled = true
+
+# Access 토큰 검증용 공개값 (webdesktop-app 의 Worker Access 앱, 2026-11-23 설정). 비밀 아님.
+[vars]
+ACCESS_TEAM_DOMAIN = "smartfactorystudy.cloudflareaccess.com"
+ACCESS_AUD = "593d67ea7c777f0c53d4af8619ba89c064f3e12c8f8ddb4997ed9f9d2104d58b"
