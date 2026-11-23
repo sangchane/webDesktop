@@ -9,7 +9,7 @@
 ## 규약
 - 전송: HTTPS JSON + WebSocket(TLS) JSON. 메시지 정의는 `crates/proto` 한 곳 → `ts-rs` 로 TS 타입 생성(공유 계약).
 - 오류 꼴: RFC 9457 Problem JSON `{type, title, status, detail}`. WebSocket 오류는 `{t:"error", type, detail}`. 스택은 내보내지 않는다.
-- 오류 이름(`type`) 전체: `unauthorized`(401) · `not_found`(404) · `code_invalid`(400) · `code_expired`(400) · `device_offline`(409) · `device_revoked`(403) · `bad_signature`(401) · `upgrade_required`(426) · `rate_limited`(429) · `too_large`(413) · `internal`(500).
+- 오류 이름(`type`) 전체: `unauthorized`(401) · `not_found`(404) · `bad_request`(400, 꼴 검사 실패 — DL-12) · `code_invalid`(400) · `code_expired`(400) · `device_offline`(409) · `device_revoked`(403) · `bad_signature`(401) · `upgrade_required`(426) · `rate_limited`(429) · `too_large`(413) · `internal`(500).
 - 세션 종료 사유(`session.end.reason`): `viewer_closed` · `host_closed` · `taken_over` · `host_shutdown` · `failed` · `device_revoked`.
 - 판: WebSocket 첫 교환에 `proto` major. 다르면 `upgrade_required` 로 닫고 에이전트는 업데이트(FR-017).
 - 페이지: 접속 기록은 커서(`before=<started_at>.<id>`).
@@ -54,7 +54,7 @@ WebSocket 메시지 (`t` 필드로 구분, 전부 `proto` 정의)
 | M-13 | 에이전트→허브 | `agent.alive` | — | 오프라인 판정 대체(04 — 자동 응답 시각 API 가 없을 때만, OFFLINE_DETECT_SEC 절반마다) |
 | M-12 | 에이전트→허브 | `vpn.path` | peer_device_id, path(direct/relay), rtt_ms | `vpn_link` 저장 → E-02·M-01 로 목록 표시(FR-018) |
 
-DataChannel 메시지 (뷰어↔도우미, 바이너리, `proto` 정의)
+DataChannel 메시지 (뷰어↔도우미, JSON 글 `{t:…}` — DL-12, `proto` 정의)
 | ID | 채널 | 종류 | 필드 | 쓰임 |
 |---|---|---|---|---|
 | D-01 | input | `mouse_move` / `mouse_button` / `wheel` | seq, x,y(0~1), button, dx,dy | FR-006·007 |
