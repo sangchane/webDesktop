@@ -1,5 +1,5 @@
 # API 계약 & 데이터 스키마 — WebDesktop
-버전: v1.2 · 기준 03 v1.2 · 개정: GATE 1차 + 재검토(N1 설치 링크 로그인 없이, N2 계측 저장 칸, N3 오프라인 판정, N5 토큰 표, VPN 경로 저장)
+버전: v1.3 · 기준 03 v1.2 · 개정: DL-10(Worker 둘로 — app 은 Access, hub 는 공개 + 입장권) · GATE 1차 + 재검토(N1 설치 링크 로그인 없이, N2 계측 저장 칸, N3 오프라인 판정, N5 토큰 표, VPN 경로 저장)
 
 근거 (진입 사전조사)
 - 정량: DO SQLite 객체당 10GB(유료), SQL 문 100KB·바인드 100개 — https://developers.cloudflare.com/durable-objects/platform/limits (2026-11-23).
@@ -28,7 +28,8 @@
 | E-03 | POST `/api/enroll-codes` | — | `{code, expires_at, install_links:{windows,macos}}` — 링크는 E-12 주소 + 1회 발급 토큰(INSTALL_LINK_TTL_MIN, 활성 코드와 같이 폐기). 이전 활성 코드·링크 폐기 | `rate_limited` | Access |
 | E-04 | POST `/agent/enroll` | `{code, pubkey(ed25519 b64), name, os, agent_version}` | `{device_id}` | `code_invalid`, `code_expired`, `rate_limited`, `too_large` | 코드 |
 | E-05 | GET `/agent/ws` (WebSocket) | 1) 허브→`{t:"hello", nonce, proto}` 2) 에이전트→`{t:"auth", device_id, sig=ed25519(nonce‖device_id), proto}` | 아래 WS 메시지 | `bad_signature`, `device_revoked`, `upgrade_required` | 기기 서명 |
-| E-06 | GET `/api/ws` (WebSocket) | 첫 메시지 `{t:"viewer.hello", viewer_id, proto}` | 아래 WS 메시지 | `unauthorized` | Access |
+| E-06 | GET `wss://webdesktop-hub…/ws/viewer?ticket=` (WebSocket, 허브 Worker) | E-13 입장권 + 첫 메시지 `{t:"viewer.hello", viewer_id, proto}` | 아래 WS 메시지 | `unauthorized`(입장권 없음·만료·사용됨) | 입장권 |
+| E-13 | POST `/api/ws-ticket` (app Worker) | `{viewer_id}` | `{ticket, hub_ws_url, expires_at}` — 1회용, 60초 | `unauthorized` | Access |
 | E-07 | POST `/api/sessions` | `{device_id, viewer_id}` | `{session_id, ice_servers:[stun, turn{urls,username,credential}]}` | `device_offline`, `device_revoked`, `not_found` | Access |
 | E-08 | DELETE `/api/devices/{id}` | — | 204 | `not_found` | Access |
 | E-09 | GET `/api/access-log?before=` | — | `{items:[{session_id,device_id,viewer_id,viewer_ua,path,click_to_first_frame_ms,latency_p50_ms,reconnect_count,reconnect_ms_max,reconnect_ms[],restarts,new_session_used,encoder,started_at,ended_at,end_reason}], next}` | — | Access |

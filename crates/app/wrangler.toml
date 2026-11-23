@@ -1,0 +1,24 @@
+# 웹앱 Worker — 화면과 /api/*. Cloudflare Access(Worker Access 탭)로 보호한다.
+# Worker Access 는 WebSocket 을 막으므로(developers.cloudflare.com/workers/configuration/cloudflare-access, 2026-11-02)
+# 실시간 연결은 공개 Worker webdesktop-hub 가 1회용 입장권으로 받는다 (decision-log DL-10).
+name = "webdesktop-app"
+main = "build/index.js"
+compatibility_date = "2026-11-01"
+
+[build]
+command = "cargo install -q \"worker-build@^0.9\" && worker-build --release"
+
+[assets]
+directory = "../../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+# 허브 Worker 의 DO 에 직접 붙는다 — /api 는 공개 허브 주소를 거치지 않는다.
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+script_name = "webdesktop-hub"
+
+[observability]
+enabled = true

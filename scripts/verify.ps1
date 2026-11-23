@@ -5,7 +5,7 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 $steps = @(
   @{ name = 'fmt';          cmd = { cargo fmt --all -- --check } },
   @{ name = 'clippy-native';cmd = { cargo clippy -q -p proto --all-targets -- -D warnings } },
-  @{ name = 'clippy-hub';   cmd = { cargo clippy -q -p hub --target wasm32-unknown-unknown -- -D warnings } },
+  @{ name = 'clippy-hub';   cmd = { cargo clippy -q -p hub -p app --target wasm32-unknown-unknown -- -D warnings } },
   @{ name = 'test';         cmd = { cargo test -q -p proto } },
   @{ name = 'deny';         cmd = { cargo deny --log-level error check licenses bans } }
 )

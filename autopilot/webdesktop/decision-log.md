@@ -23,3 +23,5 @@
 - [GATE 재검토] 같은 검토관 재검토 1회 — 판정 CONCERNS. 1차 23건: 닫힘 18·부분 5·안 닫힘 0. 새 지적 N1·N2(HIGH), N3~N5(MEDIUM), N6(LOW).
 - [GATE 재검토] DL-9 국소 수정(재검토 없이, 단계 재실행 아님): N1 설치 파일은 E-12 `/agent/install/{os}?t=` 로그인 없는 링크(INSTALL_LINK_TTL_MIN, 활성 코드와 같이 폐기) / N2 session 표에 M-10 값 칸(click_to_first_frame_ms·latency_p50_ms·reconnect_ms_json·restarts·new_session_used), 경로 출처는 M-10 하나 / N3 오프라인 = 닫힘 이벤트 또는 OFFLINE_DETECT_SEC, 자동 응답 시각 API 없으면 `agent.alive` / N4 MAC_OS_PROMPTS 5(관리자 암호 추가), 실기기로 확정 / N5 `update_token` 표 / N6 04 시퀀스 viewer_id, goals 순서, 1단계 에이전트 TURN 없음(뷰어 TURN 만), 1차 #2 `vpn_link` 표·E-02 vpn_links, #3 01·02 낡은 줄, #4 FR-009 로컬 네트워크·Remote Desktop 항목 제외 이유, #20 TURN_PRICE_USD_PER_GB.
 - 비용(GATE 까지): 서브에이전트 6개(조사 3·빌더 체크 1·GATE 1+재검토 1), 메인 검색 약 12회. 강도 full.
+- [BUILD T2] DL-10 Worker 를 둘로 나눔 — `webdesktop-app`(정적 웹앱 + /api/*, Worker Access 로 보호) + `webdesktop-hub`(공개 /agent/*·/ws/*·/healthz + DO Hub). 근거: Workers Access 문서(2026-11-02 수정) 「WebSocket 미지원(403)」, 경로 예외 없음 / 계정 zone 0개(API 확인 2026-11-23) → 호스트 단위 Access 불가. 뷰어 WS 는 E-13 1회용 입장권(60초). 버린 대안: 도메인 구입(연 약 10달러, 사용자 결제 필요), 직접 만든 로그인(코드·복구 부담).
+- [BUILD T2] 07 의 `just` 대신 `scripts/verify.ps1`(새 도구 설치 피함).

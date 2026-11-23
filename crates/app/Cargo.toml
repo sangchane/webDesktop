@@ -1,0 +1,14 @@
+[package]
+name = "app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+proto = { path = "../proto" }
+worker = { version = "0.9" }
+worker-macros = { version = "0.9" }

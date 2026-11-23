@@ -1,4 +1,4 @@
-//! 허브 입구 계층 — Worker fetch 가 경로를 나눠 DO `Hub`(인스턴스 `owner`)로 넘긴다 (04 「코드 구조」).
+//! 허브 입구 계층 — 공개 경로(/healthz, /agent/*, /ws/*)만 DO `Hub`(인스턴스 `owner`)로 넘긴다 (DL-10).
 use proto::{ErrorType, Health, Problem, PROTO_MAJOR};
 use worker::*;
 
@@ -17,7 +17,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             proto: PROTO_MAJOR,
         });
     }
-    if path.starts_with("/api/") || path.starts_with("/agent/") {
+    // /api/* 는 여기서 받지 않는다 — Access 뒤의 webdesktop-app 만 DO 에 넘긴다.
+    if path.starts_with("/agent/") || path.starts_with("/ws/") {
         let stub = env
             .durable_object("HUB")?
             .id_from_name(HUB_INSTANCE)?
