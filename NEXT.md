@@ -1,6 +1,6 @@
 <!-- NEXT-ACTION -->
-L · dev:design · GATE 완료(CONCERNS, 착수 가능) → 다음 dev:build L 경로 (2026-11-23)
-- 다음 할 일: 08 핸드오프로 dev:build 시작 → 첫 작업 1(허브 + 웹 + Windows 에이전트 최소 화면) SPEC.
-- 사용자 손 필요: Cloudflare 대시보드에서 Access 앱(+우회 2개)·Realtime TURN 키(08 착수 조건 1) — 첫 작업 1 끝에 안내.
-- 산출물: autopilot/webdesktop/00~08 · docs/goals.md
+L · dev:build · 첫 작업 1 BUILD — T1·T2 통과, 다음 T3 (2026-11-23)
+- 다음 할 일: T3 proto 전체 + ts-rs → T4 허브 등록·서명 WS → T5 세션·신호. 진행 장부 docs/specs/01-skeleton/tasks.md 첫 「아니오」부터.
+- 사용자 대기: Cloudflare Access(+우회 /agent/*·/healthz)·TURN 키 설정 → T6 에서 확인.
+- 허브: https://webdesktop-hub.sangchane87.workers.dev (Version d061e006)
 <!-- /NEXT-ACTION -->
