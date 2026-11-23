@@ -553,9 +553,12 @@ dependencies = [
 name = "hub"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "proto",
  "serde",
  "serde_json",
+ "sha2",
+ "web-sys",
  "worker",
  "worker-macros",
 ]

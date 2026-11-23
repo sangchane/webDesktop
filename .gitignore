@@ -6,3 +6,4 @@ dist/
 .env
 *.key
 .playwright-mcp/
+.dev.vars

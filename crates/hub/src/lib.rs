@@ -2,8 +2,12 @@
 use proto::{ErrorType, Health, Problem, PROTO_MAJOR};
 use worker::*;
 
-mod hub;
-pub use hub::Hub;
+mod access;
+mod crypto;
+mod entry;
+mod service;
+mod store;
+pub use entry::Hub;
 
 /// 모든 상태는 이 한 인스턴스에 있다(1인 — 04 「데이터 저장」).
 const HUB_INSTANCE: &str = "owner";

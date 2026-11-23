@@ -17,6 +17,19 @@ pub const PUBKEY_B64_LEN: usize = 44;
 /// 식별자(uuid 문자열)·서명(64바이트 base64 88자)·nonce 상한.
 pub const ID_MAX: usize = 64;
 pub const SIG_B64_MAX: usize = 128;
+/// 03 상수 표 — 등록·유지 신호·오프라인 판정·빈도.
+pub const REG_CODE_TTL_MIN: u64 = 10;
+pub const REG_CODE_MAX_TRIES: u32 = 5;
+pub const INSTALL_LINK_TTL_MIN: u64 = 10;
+pub const AGENT_HEARTBEAT_SEC: u64 = 30;
+pub const OFFLINE_DETECT_SEC: u64 = 90;
+pub const OFFLINE_WARN_HOURS: u64 = 24;
+pub const RATE_LIMIT_PER_MIN: u32 = 60;
+
+/// E-05 서명 대상 = nonce 글자 바이트 ‖ device_id 글자 바이트. 허브·에이전트가 같은 함수를 쓴다.
+pub fn auth_message(nonce: &str, device_id: &str) -> Vec<u8> {
+    [nonce.as_bytes(), device_id.as_bytes()].concat()
+}
 
 /// 05 「오류 이름」 전체. 직렬화 이름이 RFC 9457 `type` 값이다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

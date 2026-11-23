@@ -22,4 +22,6 @@ enabled = true
 # Access 토큰 검증용 공개값 (webdesktop-app 의 Worker Access 앱, 2026-11-23 설정). 비밀 아님.
 [vars]
 ACCESS_TEAM_DOMAIN = "smartfactorystudy.cloudflareaccess.com"
+# 설치 링크(E-03)에 넣는 공개 허브 주소. 시험 때는 .dev.vars 가 로컬 주소로 덮는다.
+HUB_PUBLIC_URL = "https://webdesktop-hub.sangchane87.workers.dev"
 ACCESS_AUD = "593d67ea7c777f0c53d4af8619ba89c064f3e12c8f8ddb4997ed9f9d2104d58b"
