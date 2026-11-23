@@ -1,0 +1,8 @@
+target/
+node_modules/
+build/
+dist/
+.wrangler/
+.env
+*.key
+web/src/proto/*.gen.ts.tmp

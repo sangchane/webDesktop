@@ -1,0 +1,14 @@
+# WebDesktop — 작업 규약
+
+## 네비게이션
+- 목표 한 장: `docs/goals.md` — 새 요청은 먼저 목표 번호와 대조한다.
+- 설계: `autopilot/webdesktop/` (03 요구사항·상수 표, 05 계약, 08 착수 조건). 조사 근거: `autopilot/webdesktop/research/`.
+- 재개 포인터: `NEXT.md`.
+
+## 규약
+- 서버는 사용자의 기존 Cloudflare Workers Paid 계정을 쓴다(사용자 2026-11-23 「search-real-estate에 클라우드 플레어 월 5$ 요금제 활성화 해둔 접속 정보 있으니까 그거 사용해서 하자」). 인증은 wrangler OAuth 로그인. 값은 어디에도 옮겨 적지 않는다.
+- 같은 계정에 listing 앱이 있다 → 우리 자원(Worker·DO·R2·Access 앱) 이름은 모두 `webdesktop-` 접두.
+- 배포 전 계정 한도: `D:\_personal\search-real-estate\docs\cloudflare-limits.md` 를 대조한다.
+- 코드 복사 금지 라이선스: AGPL·GPL(RustDesk·Sunshine 등) — 구조만 참고. `cargo deny` 로 막는다.
+- Jump Desktop·Tailscale 실행 파일은 디컴파일하지 않는다(약관 금지 — research/local-inspection.md 관문).
+- 상수(상한·기간·임계)는 `03-prd.md` 상수 표가 단일 출처. 코드는 이름으로 옮긴다.

@@ -1,0 +1,17 @@
+# tasks — 첫 작업 1 (워킹 스켈레톤)
+한 번에 한 줄. 검증 출력을 본 뒤에만 「통과: 예」.
+
+| # | 할 일 | 검증 | 통과 |
+|---|---|---|---|
+| T1 | 작업 공간(Cargo workspace·web·scripts/verify.ps1) + proto 최소(오류 이름·healthz) | `pwsh scripts/verify.ps1` → `VERIFY OK` | 예 (2026-11-23 VERIFY OK) |
+| T2 | 허브 뼈대(Worker+DO Hub, /healthz, 정적 웹앱 자리) 배포 → 사용자에게 Access·TURN 안내 | `curl -s https://webdesktop-hub.<계정>.workers.dev/healthz` → `"ok":true` | 예 (healthz 200 {"ok":true,"proto":1}) |
+| T3 | proto 전체(이번 범위 메시지) + ts-rs 생성 | verify + `cargo test -p proto` | 아니오 |
+| T4 | 허브 등록·설치 링크·기기 서명 WS·목록·오프라인 판정 + 마이그레이션 | `node --test tools/hub.test.mjs` 등록·서명 묶음 `# fail 0` | 아니오 |
+| T5 | 허브 세션·신호 중계·TURN 자격·이어받기·viewer_stats | `node --test tools/hub.test.mjs` 세션 묶음 `# fail 0` | 아니오 |
+| T6 | Access 확인(사용자 설정 뒤) | `node tools/check-access.mjs` → `ACCESS OK` | 아니오 |
+| T7 | 웹앱 목록·기기 추가·원격 화면·입력 변환기·계측 | `node --test web/test` `# fail 0` + 화면 확인 스크립트 | 아니오 |
+| T8 | 에이전트: 키·등록·WS·재접속 | 로컬 허브에 등록 → 목록 온라인 | 아니오 |
+| T9 | 에이전트 세션: DXGI → openh264 → str0m, 입력 주입, input.applied | PC Chrome 으로 화면·클릭·타자(C6) | 아니오 |
+| T10 | 배포 + PC 브라우저 C5·C6·C7 | `node tools/report.mjs --last` | 아니오 |
+| T11 | iPhone LTE 실기기 C8 (사용자 협조) | `node tools/report.mjs --since …` 판정 | 아니오 |
+| T12 | 24시간 연결 C9 | `node tools/report.mjs --uptime …` | 아니오 |

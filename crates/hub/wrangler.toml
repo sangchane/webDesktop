@@ -1,0 +1,25 @@
+# 허브 — Cloudflare Worker + Durable Object (04-architecture.md 「코드 구조」, 07 「배포」).
+# 같은 계정에 listing 앱이 있다 → 자원 이름은 모두 webdesktop- 접두 (AGENTS.md).
+name = "webdesktop-hub"
+main = "build/index.js"
+compatibility_date = "2026-11-01"
+
+[build]
+command = "cargo install -q \"worker-build@^0.9\" && worker-build --release"
+
+[assets]
+directory = "../../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/agent/*", "/healthz"]
+
+[[durable_objects.bindings]]
+name = "HUB"
+class_name = "Hub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Hub"]
+
+[observability]
+enabled = true
