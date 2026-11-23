@@ -1,13 +1,14 @@
 //! 입구 계층 — DO `Hub` 의 경로·인증(Access JWT·기기 서명)·빈도 제한·꼴 검사. 통과한 값만 service·store 로 (04 「코드 구조」).
 use crate::access::{Access, JwksCache};
 use crate::crypto::{ed25519_verify, random};
-use crate::service::{self, CodeVerdict, RateLimit};
-use crate::store::{DeviceRow, NewDevice, Store};
+use crate::service::{self, CodeVerdict, RateLimit, SessionPlan, Tickets};
+use crate::store::{DeviceRow, NewDevice, SessionRow, Stats, Store};
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine;
 use proto::{
-    parse, Device, EnrollCode, EnrollReq, EnrollResp, ErrorType, InstallLinks, Os, Perm, WsMsg,
-    PROTO_MAJOR, REG_CODE_LEN, WS_MSG_MAX_BYTES,
+    parse, Device, EndReason, EnrollCode, EnrollReq, EnrollResp, ErrorType, IceServer,
+    InstallLinks, Os, Perm, SessionReq, SessionResp, Validate, WsMsg, WsTicket, WsTicketReq,
+    PROTO_MAJOR, REG_CODE_LEN, VIEWER_UA_MAX, WS_MSG_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,6 +18,9 @@ use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 const TAG_AGENT: &str = "agent";
+const TAG_VIEWER: &str = "viewer";
+/// 운영 TURN 자격 API (Cloudflare Realtime TURN 「Generate Credentials」).
+const TURN_API: &str = "https://rtc.live.cloudflare.com";
 /// 같은 기기가 다시 붙어 앞 연결을 닫을 때·오래 조용해 닫을 때의 닫힘 코드(응용 영역 4000~).
 const CLOSE_REPLACED: u16 = 4000;
 const CLOSE_STALE: u16 = 4001;
@@ -30,9 +34,17 @@ struct AgentAtt {
     nonce: String,
     device_id: Option<String>,
     opened_at: i64,
-    /// 허브가 「조용함」으로 닫는 중 — 닫힘 이벤트가 last_seen_at 을 지금으로 덮지 않게.
+    /// 허브가 닫는 중(조용함·새 연결로 대체) — 닫힘 이벤트가 last_seen_at·온라인 표시를 덮지 않게.
     #[serde(default)]
     stale: bool,
+}
+
+/// 뷰어 WebSocket 상태 (E-06). viewer_id 는 입장권에서 온다.
+#[derive(Serialize, Deserialize)]
+struct ViewerAtt {
+    viewer_id: String,
+    /// viewer.hello 를 받았다.
+    ready: bool,
 }
 
 #[durable_object]
@@ -42,12 +54,17 @@ pub struct Hub {
     store: Store,
     limiter: RefCell<RateLimit>,
     jwks: JwksCache,
+    tickets: RefCell<Tickets>,
 }
 
 /// 요청마다 읽는 설정. 빠지면 500 `internal`(SPEC 바닥선 8).
 struct Config {
     access: Access,
     hub_url: String,
+    turn_key_id: String,
+    turn_key_token: String,
+    /// 운영은 TURN_API, 시험은 가짜 TURN 서버(TURN_TEST_URL).
+    turn_api: String,
     /// 시험 모드(ACCESS_TEST_JWKS 가 있고 로컬 주소) — `x-test-now` 로 시계를 옮길 수 있다.
     test: bool,
 }
@@ -97,10 +114,12 @@ impl Hub {
                 .map(|v| v.to_string())
                 .filter(|v| !v.is_empty())
         };
-        let (Some(team_domain), Some(aud), Some(hub_url)) = (
+        let (Some(team_domain), Some(aud), Some(hub_url), Some(turn_key_id), Some(turn_key_token)) = (
             var("ACCESS_TEAM_DOMAIN"),
             var("ACCESS_AUD"),
             var("HUB_PUBLIC_URL"),
+            var("TURN_KEY_ID"),
+            var("TURN_KEY_TOKEN"),
         ) else {
             log(
                 "error",
@@ -110,6 +129,7 @@ impl Hub {
             return Err(ErrorType::Internal);
         };
         let test_jwks = var("ACCESS_TEST_JWKS");
+        let turn_test = var("TURN_TEST_URL");
         let local = matches!(
             req.url()
                 .ok()
@@ -117,11 +137,11 @@ impl Hub {
                 .as_deref(),
             Some("localhost" | "127.0.0.1")
         );
-        if test_jwks.is_some() && !local {
+        if (test_jwks.is_some() || turn_test.is_some()) && !local {
             log(
                 "error",
                 "internal_error",
-                json!({ "detail": "ACCESS_TEST_JWKS outside localhost" }),
+                json!({ "detail": "test vars outside localhost" }),
             );
             return Err(ErrorType::Internal);
         }
@@ -132,6 +152,9 @@ impl Hub {
                 test_jwks: test_jwks.clone(),
             },
             hub_url,
+            turn_key_id,
+            turn_key_token,
+            turn_api: turn_test.unwrap_or_else(|| TURN_API.into()),
             test: test_jwks.is_some(),
         })
     }
@@ -145,6 +168,49 @@ impl Hub {
                 Some((ws, att))
             })
             .collect()
+    }
+
+    fn is_viewer(&self, ws: &WebSocket) -> bool {
+        self.state.get_tags(ws).iter().any(|t| t == TAG_VIEWER)
+    }
+
+    fn agent_for(&self, device_id: &str) -> Option<WebSocket> {
+        self.agent_sockets()
+            .into_iter()
+            .find(|(_, a)| a.device_id.as_deref() == Some(device_id) && !a.stale)
+            .map(|(ws, _)| ws)
+    }
+
+    /// viewer.hello 를 마친 뷰어 연결.
+    fn viewers(&self) -> Vec<(WebSocket, ViewerAtt)> {
+        self.state
+            .get_websockets_with_tag(TAG_VIEWER)
+            .into_iter()
+            .filter_map(|ws| {
+                let att = ws.deserialize_attachment::<ViewerAtt>().ok().flatten()?;
+                att.ready.then_some((ws, att))
+            })
+            .collect()
+    }
+
+    fn send_viewer(&self, viewer_id: &str, msg: &WsMsg) {
+        for (ws, att) in self.viewers() {
+            if att.viewer_id == viewer_id {
+                let _ = ws.send(msg);
+            }
+        }
+    }
+
+    /// M-01 — 온라인이 바뀐 기기를 모든 뷰어에게.
+    fn push_status(&self, device_id: &str, online: bool, now_ms: i64) -> Result<()> {
+        let Some(d) = self.store.device_get(device_id)? else {
+            return Ok(());
+        };
+        let msg = status_msg(to_device(d, online, now_ms));
+        for (ws, _) in self.viewers() {
+            let _ = ws.send(&msg);
+        }
+        Ok(())
     }
 
     /// 휴면 중 DO 가 `ping` 에 자동 응답한 마지막 시각. workers-rs 에 감싼 함수가 없어 JS 로 부른다.
@@ -164,6 +230,10 @@ impl Hub {
     fn sweep(&self, now_ms: i64) -> Result<Vec<String>> {
         let mut online = Vec::new();
         for (ws, att) in self.agent_sockets() {
+            // 허브가 이미 닫는 중인 연결.
+            if att.stale {
+                continue;
+            }
             let Some(id) = att.device_id else {
                 if service::is_stale(att.opened_at, now_ms) {
                     let _ = ws.close(Some(CLOSE_STALE), Some("auth timeout"));
@@ -190,6 +260,7 @@ impl Hub {
                     "agent.disconnected",
                     json!({ "device_id": id, "why": "stale" }),
                 );
+                self.push_status(&id, false, now_ms)?;
             } else {
                 online.push(id);
             }
@@ -203,9 +274,15 @@ impl Hub {
             Some(t) if cfg.test => t.parse().map_err(|_| ErrorType::BadRequest)?,
             _ => now(),
         };
+        // 시험은 묶음마다 다른 주소로 — 한 분 안에 여러 묶음이 빈도 한도를 나눠 쓰지 않게.
+        let ip_header = if cfg.test {
+            "x-test-ip"
+        } else {
+            "cf-connecting-ip"
+        };
         let ip = req
             .headers()
-            .get("cf-connecting-ip")
+            .get(ip_header)
             .ok()
             .flatten()
             .unwrap_or_else(|| "local".into());
@@ -214,14 +291,6 @@ impl Hub {
             return Err(ErrorType::RateLimited);
         }
         let path = req.path();
-        let internal = |e: Error| {
-            log(
-                "error",
-                "internal_error",
-                json!({ "detail": e.to_string() }),
-            );
-            ErrorType::Internal
-        };
         if path.starts_with("/api/") {
             let token = req.headers().get("cf-access-jwt-assertion").ok().flatten();
             cfg.access.check(token, now_ms, &self.jwks).await?;
@@ -229,17 +298,12 @@ impl Hub {
         match (req.method(), path.as_str()) {
             (Method::Post, "/api/enroll-codes") => self.new_code(&cfg, now_ms).map_err(internal),
             (Method::Get, "/api/devices") => self.devices(now_ms).map_err(internal),
+            (Method::Post, "/api/ws-ticket") => self.ticket(req, &cfg, now_ms).await,
+            (Method::Post, "/api/sessions") => self.open_session(req, &cfg, now_ms).await,
+            (Method::Get, "/ws/viewer") => self.viewer_ws(&req, now_ms),
             (Method::Post, "/agent/enroll") => self.enroll(req, now_ms).await,
             (Method::Get, "/agent/install/windows" | "/agent/install/macos") => {
-                let token = req
-                    .url()
-                    .ok()
-                    .and_then(|u| {
-                        u.query_pairs()
-                            .find(|(k, _)| k == "t")
-                            .map(|(_, v)| v.into_owned())
-                    })
-                    .unwrap_or_default();
+                let token = query(&req, "t");
                 let row = self.store.code_get().map_err(internal)?;
                 service::judge_install(row.as_ref(), &token, now_ms)?;
                 // shortcut: 설치 파일(R2 webdesktop-releases)은 에이전트 빌드(T8) 뒤에 붙인다 — 그때까지 토큰만 확인.
@@ -278,7 +342,10 @@ impl Hub {
             .store
             .devices()?
             .into_iter()
-            .map(|d| to_device(d, &online, now_ms))
+            .map(|d| {
+                let on = online.contains(&d.id);
+                to_device(d, on, now_ms)
+            })
             .collect();
         Response::from_json(&list)
     }
@@ -289,27 +356,7 @@ impl Hub {
         mut req: Request,
         now_ms: i64,
     ) -> std::result::Result<Response, ErrorType> {
-        // 본문을 읽기 전에 크기부터 — 큰 본문이 DO 메모리를 채우지 못하게.
-        let len: usize = req
-            .headers()
-            .get("content-length")
-            .ok()
-            .flatten()
-            .and_then(|v| v.parse().ok())
-            .ok_or(ErrorType::BadRequest)?;
-        if len > WS_MSG_MAX_BYTES {
-            return Err(ErrorType::TooLarge);
-        }
-        let body = req.text().await.map_err(|_| ErrorType::BadRequest)?;
-        let r: EnrollReq = parse(&body)?;
-        let internal = |e: Error| {
-            log(
-                "error",
-                "internal_error",
-                json!({ "detail": e.to_string() }),
-            );
-            ErrorType::Internal
-        };
+        let r: EnrollReq = read_body(&mut req).await?;
         let row = self.store.code_get().map_err(internal)?;
         let reject = |why: &str, kind: ErrorType| {
             log("warn", "enroll.rejected", json!({ "why": why }));
@@ -445,14 +492,16 @@ impl Hub {
         }
         for (old, a) in self.agent_sockets() {
             if a.device_id.as_deref() == Some(&device_id) {
+                let _ = old.serialize_attachment(AgentAtt { stale: true, ..a });
                 let _ = old.close(Some(CLOSE_REPLACED), Some("replaced"));
             }
         }
         att.device_id = Some(device_id.clone());
         ws.serialize_attachment(&att)?;
-        self.store.device_seen(&device_id, now())?;
+        let t = now();
+        self.store.device_seen(&device_id, t)?;
         log("info", "agent.connected", json!({ "device_id": device_id }));
-        Ok(())
+        self.push_status(&device_id, true, t)
     }
 
     fn agent_gone(&self, ws: &WebSocket) -> Result<()> {
@@ -462,15 +511,459 @@ impl Hub {
             ..
         }) = ws.deserialize_attachment()?
         {
-            self.store.device_seen(&id, now())?;
+            let t = now();
+            self.store.device_seen(&id, t)?;
             log("info", "agent.disconnected", json!({ "device_id": id }));
+            self.push_status(&id, false, t)?;
         }
         Ok(())
     }
 }
 
-fn to_device(d: DeviceRow, online: &[String], now_ms: i64) -> Device {
-    let on = online.contains(&d.id);
+/// 뷰어 입장권·세션·신호 중계 (E-13·E-06·E-07·M-01~M-04·M-10).
+impl Hub {
+    /// E-13 — 1회용, WS_TICKET_TTL_SEC.
+    async fn ticket(
+        &self,
+        mut req: Request,
+        cfg: &Config,
+        now_ms: i64,
+    ) -> std::result::Result<Response, ErrorType> {
+        let r: WsTicketReq = read_body(&mut req).await?;
+        let ticket = B64URL.encode(random::<32>());
+        let exp = self
+            .tickets
+            .borrow_mut()
+            .issue(&ticket, &r.viewer_id, now_ms);
+        let ws = WsTicket {
+            ticket,
+            hub_ws_url: format!("{}/ws/viewer", cfg.hub_url.replacen("http", "ws", 1)),
+            expires_at: iso(exp),
+        };
+        json_status(&ws, 201).map_err(internal)
+    }
+
+    /// E-06 — 입장권을 먼저 쓴다(틀리면 업그레이드 전에 401). 업그레이드가 아닌 요청이 입장권을 써 버려도
+    /// 뷰어는 새로 받으면 된다 — 대신 일반 HTTP 로도 401 을 확인할 수 있다(운영 확인 check-access).
+    fn viewer_ws(&self, req: &Request, now_ms: i64) -> std::result::Result<Response, ErrorType> {
+        let viewer_id = self
+            .tickets
+            .borrow_mut()
+            .take(&query(req, "ticket"), now_ms)?;
+        let upgrade = req
+            .headers()
+            .get("upgrade")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if !upgrade.eq_ignore_ascii_case("websocket") {
+            return Err(ErrorType::BadRequest);
+        }
+        let pair = WebSocketPair::new().map_err(internal)?;
+        self.state
+            .accept_websocket_with_tags(&pair.server, &[TAG_VIEWER]);
+        let att = ViewerAtt {
+            viewer_id,
+            ready: false,
+        };
+        if let Err(e) = pair.server.serialize_attachment(att) {
+            let _ = pair.server.close(Some(1011), Some("internal"));
+            return Err(internal(e));
+        }
+        Response::from_websocket(pair.client).map_err(internal)
+    }
+
+    /// TURN 자격(TURN_CRED_TTL_MIN). 실패하면 `internal`.
+    async fn turn(&self, cfg: &Config) -> std::result::Result<Vec<IceServer>, ErrorType> {
+        let call = async {
+            let headers = Headers::new();
+            headers.set("authorization", &format!("Bearer {}", cfg.turn_key_token))?;
+            headers.set("content-type", "application/json")?;
+            let mut init = RequestInit::new();
+            init.with_method(Method::Post)
+                .with_headers(headers)
+                .with_body(Some(
+                    json!({ "ttl": service::TURN_TTL_SEC }).to_string().into(),
+                ));
+            let url = format!(
+                "{}/v1/turn/keys/{}/credentials/generate-ice-servers",
+                cfg.turn_api, cfg.turn_key_id
+            );
+            let mut res = Fetch::Request(Request::new_with_init(&url, &init)?)
+                .send()
+                .await?;
+            Ok::<_, Error>((res.status_code(), res.text().await?))
+        };
+        let (status, body) = call.await.map_err(internal)?;
+        match (status, service::ice_servers(&body)) {
+            (200..=299, Some(ice)) => {
+                log("info", "turn.issued", json!({}));
+                Ok(ice)
+            }
+            _ => {
+                log(
+                    "error",
+                    "internal_error",
+                    json!({ "detail": "turn credentials", "status": status }),
+                );
+                Err(ErrorType::Internal)
+            }
+        }
+    }
+
+    /// E-07 — 05 「규약」 멱등·이어받기.
+    async fn open_session(
+        &self,
+        mut req: Request,
+        cfg: &Config,
+        now_ms: i64,
+    ) -> std::result::Result<Response, ErrorType> {
+        let r: SessionReq = read_body(&mut req).await?;
+        let ua: Option<String> = req
+            .headers()
+            .get("user-agent")
+            .ok()
+            .flatten()
+            .map(|u| u.chars().take(VIEWER_UA_MAX).collect());
+        let dev = self
+            .store
+            .device_get(&r.device_id)
+            .map_err(internal)?
+            .ok_or(ErrorType::NotFound)?;
+        if dev.revoked_at.is_some() {
+            return Err(ErrorType::DeviceRevoked);
+        }
+        if !self.sweep(now_ms).map_err(internal)?.contains(&dev.id) {
+            return Err(ErrorType::DeviceOffline);
+        }
+        let ice = self.turn(cfg).await?;
+        // await 뒤라 다시 본다. 아래 쓰기는 await 없이 한 묶음으로 커밋된다.
+        let revoked = self
+            .store
+            .device_get(&dev.id)
+            .map_err(internal)?
+            .is_none_or(|d| d.revoked_at.is_some());
+        if revoked {
+            return Err(ErrorType::DeviceRevoked);
+        }
+        let agent = self.agent_for(&dev.id).ok_or(ErrorType::DeviceOffline)?;
+        let open = self.store.session_open(&dev.id).map_err(internal)?;
+        match (
+            service::session_plan(open.as_ref().map(|s| s.viewer_id.as_str()), &r.viewer_id),
+            open,
+        ) {
+            (SessionPlan::Reuse, Some(s)) => {
+                // 에이전트가 그사이 다시 붙었으면 이 세션을 모른다 — 다시 알린다(에이전트는 session_id 로 중복을 거른다).
+                let start = WsMsg::SessionStart {
+                    session_id: s.id.clone(),
+                    ice_servers: ice.clone(),
+                };
+                if agent.send(&start).is_err() {
+                    return Err(ErrorType::DeviceOffline);
+                }
+                let resp = SessionResp {
+                    session_id: s.id,
+                    ice_servers: ice,
+                };
+                return json_status(&resp, 200).map_err(internal);
+            }
+            (SessionPlan::TakeOver, Some(old)) => {
+                self.end_session(&old, EndReason::TakenOver, now_ms)
+                    .map_err(internal)?;
+                log(
+                    "info",
+                    "session.taken_over",
+                    json!({ "session_id": old.id }),
+                );
+            }
+            _ => {}
+        }
+        let id = service::uuid_v7(now_ms, &random::<10>());
+        self.store
+            .session_insert(&id, &dev.id, &r.viewer_id, ua.as_deref(), now_ms)
+            .map_err(internal)?;
+        let start = WsMsg::SessionStart {
+            session_id: id.clone(),
+            ice_servers: ice.clone(),
+        };
+        if agent.send(&start).is_err() {
+            self.store
+                .session_end(&id, &name_of(EndReason::Failed), now_ms)
+                .map_err(internal)?;
+            log(
+                "warn",
+                "session.failed",
+                json!({ "session_id": id, "why": "agent_send" }),
+            );
+            return Err(ErrorType::DeviceOffline);
+        }
+        log(
+            "info",
+            "session.started",
+            json!({ "session_id": id, "device_id": dev.id }),
+        );
+        let resp = SessionResp {
+            session_id: id,
+            ice_servers: ice,
+        };
+        json_status(&resp, 201).map_err(internal)
+    }
+
+    /// 허브가 세션을 닫을 때 — 양쪽에 session.end.
+    fn end_session(&self, s: &SessionRow, reason: EndReason, now_ms: i64) -> Result<()> {
+        self.store.session_end(&s.id, &name_of(reason), now_ms)?;
+        let msg = WsMsg::SessionEnd {
+            session_id: s.id.clone(),
+            reason,
+        };
+        self.send_viewer(&s.viewer_id, &msg);
+        if let Some(a) = self.agent_for(&s.device_id) {
+            let _ = a.send(&msg);
+        }
+        Ok(())
+    }
+
+    /// E-06 — 첫 메시지는 viewer.hello, 그 뒤 신호·종료·계측.
+    fn viewer_message(&self, ws: &WebSocket, message: WebSocketIncomingMessage) -> Result<()> {
+        let Some(mut att) = ws.deserialize_attachment::<ViewerAtt>()? else {
+            return Ok(());
+        };
+        let WebSocketIncomingMessage::String(text) = message else {
+            ws_error(ws, ErrorType::BadRequest, true);
+            return Ok(());
+        };
+        let msg = match parse::<WsMsg>(&text) {
+            Ok(m) => m,
+            Err(kind) => {
+                ws_error(ws, kind, kind == ErrorType::TooLarge || !att.ready);
+                return Ok(());
+            }
+        };
+        if !att.ready {
+            match msg {
+                WsMsg::ViewerHello { viewer_id, proto } if viewer_id == att.viewer_id => {
+                    if proto != PROTO_MAJOR {
+                        ws_error(ws, ErrorType::UpgradeRequired, true);
+                        return Ok(());
+                    }
+                    att.ready = true;
+                    ws.serialize_attachment(&att)?;
+                    // 붙은 순간의 목록 — 목록 조회와 연결 사이에 바뀐 것을 놓치지 않게.
+                    let now_ms = now();
+                    let online = self.sweep(now_ms)?;
+                    for d in self.store.devices()? {
+                        let on = online.contains(&d.id);
+                        let _ = ws.send(&status_msg(to_device(d, on, now_ms)));
+                    }
+                }
+                _ => ws_error(ws, ErrorType::Unauthorized, true),
+            }
+            return Ok(());
+        }
+        let Some(sid) = session_of(&msg) else {
+            ws_error(ws, ErrorType::BadRequest, false);
+            return Ok(());
+        };
+        // 이 뷰어의 세션만. 계측은 닫힌 뒤에도 받는다.
+        let stats = matches!(msg, WsMsg::ViewerStats { .. });
+        let s = match self.store.session_get(sid)? {
+            Some(s) if s.viewer_id == att.viewer_id && (stats || s.ended_at.is_none()) => s,
+            _ => {
+                ws_error(ws, ErrorType::NotFound, false);
+                return Ok(());
+            }
+        };
+        match &msg {
+            WsMsg::ViewerStats {
+                click_to_first_frame_ms,
+                latency_p50_ms,
+                reconnect_ms,
+                restarts,
+                new_session_used,
+                path,
+                ..
+            } => {
+                let path = path.map(name_of);
+                self.store.session_stats(
+                    &s.id,
+                    &Stats {
+                        path: path.as_deref(),
+                        click_to_first_frame_ms: *click_to_first_frame_ms,
+                        latency_p50_ms: *latency_p50_ms,
+                        reconnect_ms,
+                        restarts: *restarts,
+                        new_session_used: *new_session_used,
+                    },
+                )?;
+            }
+            WsMsg::SessionEnd { reason, .. } => {
+                if !service::end_reason_ok(*reason, false) {
+                    ws_error(ws, ErrorType::BadRequest, false);
+                    return Ok(());
+                }
+                self.store.session_end(&s.id, &name_of(*reason), now())?;
+                log_end(&s.id, *reason);
+                if let Some(a) = self.agent_for(&s.device_id) {
+                    let _ = a.send(&msg);
+                }
+            }
+            // 신호 — 에이전트로.
+            _ => match self.agent_for(&s.device_id) {
+                Some(a) => {
+                    let _ = a.send(&msg);
+                }
+                None => ws_error(ws, ErrorType::DeviceOffline, false),
+            },
+        }
+        Ok(())
+    }
+
+    /// 에이전트 WS — 인증 전이면 auth, 뒤면 신호·종료.
+    async fn agent_ws_message(
+        &self,
+        ws: &WebSocket,
+        message: WebSocketIncomingMessage,
+    ) -> Result<()> {
+        let Some(att) = ws.deserialize_attachment::<AgentAtt>()? else {
+            return Ok(());
+        };
+        let WebSocketIncomingMessage::String(text) = message else {
+            ws_error(ws, ErrorType::BadRequest, true);
+            return Ok(());
+        };
+        let msg = match parse::<WsMsg>(&text) {
+            Ok(m) => m,
+            Err(kind) => {
+                // 인증 전 소켓은 꼴이 틀리면 바로 닫는다.
+                ws_error(
+                    ws,
+                    kind,
+                    kind == ErrorType::TooLarge || att.device_id.is_none(),
+                );
+                return Ok(());
+            }
+        };
+        match &att.device_id {
+            None => self.agent_auth(ws, att, msg).await,
+            Some(id) => {
+                self.store.device_seen(id, now())?;
+                self.agent_message(ws, id, msg)
+            }
+        }
+    }
+
+    /// 인증된 에이전트의 신호·종료 — 그 세션의 뷰어로.
+    fn agent_message(&self, ws: &WebSocket, device_id: &str, msg: WsMsg) -> Result<()> {
+        let sid = match session_of(&msg) {
+            Some(sid) if !matches!(msg, WsMsg::ViewerStats { .. }) => sid,
+            _ => {
+                ws_error(ws, ErrorType::BadRequest, false);
+                return Ok(());
+            }
+        };
+        let s = match self.store.session_get(sid)? {
+            Some(s) if s.device_id == device_id && s.ended_at.is_none() => s,
+            _ => {
+                ws_error(ws, ErrorType::NotFound, false);
+                return Ok(());
+            }
+        };
+        if let WsMsg::SessionEnd { reason, .. } = &msg {
+            if !service::end_reason_ok(*reason, true) {
+                ws_error(ws, ErrorType::BadRequest, false);
+                return Ok(());
+            }
+            self.store.session_end(&s.id, &name_of(*reason), now())?;
+            log_end(&s.id, *reason);
+        }
+        self.send_viewer(&s.viewer_id, &msg);
+        Ok(())
+    }
+}
+
+/// 본문을 크기 → JSON → 꼴 검사 순으로 읽는다. 크기는 읽기 전에 — 큰 본문이 DO 메모리를 채우지 못하게.
+async fn read_body<T: serde::de::DeserializeOwned + Validate>(
+    req: &mut Request,
+) -> std::result::Result<T, ErrorType> {
+    let len: usize = req
+        .headers()
+        .get("content-length")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .ok_or(ErrorType::BadRequest)?;
+    if len > WS_MSG_MAX_BYTES {
+        return Err(ErrorType::TooLarge);
+    }
+    let body = req.text().await.map_err(|_| ErrorType::BadRequest)?;
+    parse(&body)
+}
+
+fn query(req: &Request, key: &str) -> String {
+    req.url()
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.into_owned())
+        })
+        .unwrap_or_default()
+}
+
+fn internal(e: Error) -> ErrorType {
+    log(
+        "error",
+        "internal_error",
+        json!({ "detail": e.to_string() }),
+    );
+    ErrorType::Internal
+}
+
+/// serde 이름(snake_case) 그대로 — DB 칸에 넣을 때.
+fn name_of<T: Serialize>(v: T) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn log_end(session_id: &str, reason: EndReason) {
+    let event = if reason == EndReason::Failed {
+        "session.failed"
+    } else {
+        "session.ended"
+    };
+    log(
+        "info",
+        event,
+        json!({ "session_id": session_id, "reason": name_of(reason) }),
+    );
+}
+
+/// 신호·종료·계측 메시지의 세션 id. 나머지는 None.
+fn session_of(msg: &WsMsg) -> Option<&str> {
+    match msg {
+        WsMsg::SignalOffer { session_id, .. }
+        | WsMsg::SignalAnswer { session_id, .. }
+        | WsMsg::SignalCandidate { session_id, .. }
+        | WsMsg::SignalRestart { session_id }
+        | WsMsg::SessionEnd { session_id, .. }
+        | WsMsg::ViewerStats { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+fn status_msg(d: Device) -> WsMsg {
+    WsMsg::DeviceStatus {
+        device_id: d.id,
+        online: d.online,
+        perm: d.perm,
+        connectable: d.connectable,
+        last_seen_at: d.last_seen_at,
+    }
+}
+
+fn to_device(d: DeviceRow, on: bool, now_ms: i64) -> Device {
     let perm: Perm = serde_json::from_value(json!(d.perm)).unwrap_or(Perm::NeedMulti);
     let last = d.last_seen_at.unwrap_or(d.created_at);
     Device {
@@ -511,6 +1004,7 @@ impl DurableObject for Hub {
             store,
             limiter: RefCell::default(),
             jwks: JwksCache::default(),
+            tickets: RefCell::default(),
         }
     }
 
@@ -526,34 +1020,17 @@ impl DurableObject for Hub {
         ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
-        let Some(att) = ws.deserialize_attachment::<AgentAtt>()? else {
-            return Ok(());
+        let handled = if self.is_viewer(&ws) {
+            self.viewer_message(&ws, message)
+        } else {
+            self.agent_ws_message(&ws, message).await
         };
-        let WebSocketIncomingMessage::String(text) = message else {
-            ws_error(&ws, ErrorType::BadRequest, true);
-            return Ok(());
-        };
-        let msg = match parse::<WsMsg>(&text) {
-            Ok(m) => m,
-            Err(kind) => {
-                // 인증 전 소켓은 꼴이 틀리면 바로 닫는다.
-                ws_error(
-                    &ws,
-                    kind,
-                    kind == ErrorType::TooLarge || att.device_id.is_none(),
-                );
-                return Ok(());
-            }
-        };
-        match &att.device_id {
-            None => self.agent_auth(&ws, att, msg).await,
-            Some(id) => {
-                self.store.device_seen(id, now())?;
-                // shortcut: 세션·신호 메시지는 T5 에서 받는다 — 지금은 모두 거절.
-                ws_error(&ws, ErrorType::BadRequest, false);
-                Ok(())
-            }
+        // 저장 오류를 런타임에 넘기지 않고 남긴다 — 보낸 쪽도 실패를 안다.
+        if let Err(e) = handled {
+            internal(e);
+            ws_error(&ws, ErrorType::Internal, false);
         }
+        Ok(())
     }
 
     async fn websocket_close(
@@ -564,10 +1041,16 @@ impl DurableObject for Hub {
         _clean: bool,
     ) -> Result<()> {
         let _ = ws.close(Some(1000), Some("bye"));
+        if self.is_viewer(&ws) {
+            return Ok(());
+        }
         self.agent_gone(&ws)
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: Error) -> Result<()> {
+        if self.is_viewer(&ws) {
+            return Ok(());
+        }
         self.agent_gone(&ws)
     }
 }

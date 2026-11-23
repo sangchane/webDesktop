@@ -13,7 +13,7 @@
 - 세션 종료 사유(`session.end.reason`): `viewer_closed` · `host_closed` · `taken_over` · `host_shutdown` · `failed` · `device_revoked`.
 - 판: WebSocket 첫 교환에 `proto` major. 다르면 `upgrade_required` 로 닫고 에이전트는 업데이트(FR-017).
 - 페이지: 접속 기록은 커서(`before=<started_at>.<id>`).
-- 뷰어 식별: 웹앱이 처음 열릴 때 무작위 `viewer_id`(uuid)를 만들어 localStorage 에 두고 `/api/ws` 첫 메시지와 `POST /api/sessions` 에 보낸다(모든 뷰어가 같은 Access 이메일이라 구분용).
+- 뷰어 식별: 웹앱이 처음 열릴 때 무작위 `viewer_id`(uuid)를 만들어 localStorage 에 두고 `/ws/viewer` 첫 메시지(viewer.hello)와 `POST /api/sessions` 에 보낸다(모든 뷰어가 같은 Access 이메일이라 구분용).
 - 멱등: `POST /api/sessions` — 같은 `viewer_id`·같은 기기의 열린 세션이 있으면 그 세션을 돌려준다. 다른 `viewer_id` 면 앞 세션을 `taken_over` 로 닫고 새로 만든다. `POST /agent/enroll` 은 코드 1회용이라 재시도는 `code_invalid`.
 - 인증: `/`·`/assets/*`·`/api/*` = Cloudflare Access(Worker 가 `Cf-Access-Jwt-Assertion` 서명·aud 도 직접 검증). `/agent/*`·`/healthz` = Access 우회(03 가정 H2), `/agent/*` 는 기기 서명 또는 등록 코드 또는 설치 토큰 또는 업데이트 토큰.
 - 꼴 검사: 입구에서 크기 ≤ WS_MSG_MAX_BYTES, 필드 길이 상한, enum 확인 → 통과한 타입만 서비스로.
@@ -29,8 +29,8 @@
 | E-04 | POST `/agent/enroll` | `{code, pubkey(ed25519 b64), name, os, agent_version}` | `{device_id}` | `code_invalid`, `code_expired`, `rate_limited`, `too_large` | 코드 |
 | E-05 | GET `/agent/ws` (WebSocket) | 1) 허브→`{t:"hello", nonce, proto}` 2) 에이전트→`{t:"auth", device_id, sig=ed25519(nonce‖device_id), proto}` | 아래 WS 메시지 | `bad_signature`, `device_revoked`, `upgrade_required` | 기기 서명 |
 | E-06 | GET `wss://webdesktop-hub…/ws/viewer?ticket=` (WebSocket, 허브 Worker) | E-13 입장권 + 첫 메시지 `{t:"viewer.hello", viewer_id, proto}` | 아래 WS 메시지 | `unauthorized`(입장권 없음·만료·사용됨) | 입장권 |
-| E-13 | POST `/api/ws-ticket` (app Worker) | `{viewer_id}` | `{ticket, hub_ws_url, expires_at}` — 1회용, 60초 | `unauthorized` | Access |
-| E-07 | POST `/api/sessions` | `{device_id, viewer_id}` | `{session_id, ice_servers:[stun, turn{urls,username,credential}]}` | `device_offline`, `device_revoked`, `not_found` | Access |
+| E-13 | POST `/api/ws-ticket` (app Worker) | `{viewer_id}` | `{ticket, hub_ws_url, expires_at}` — 1회용, WS_TICKET_TTL_SEC. `hub_ws_url` 은 `wss://…/ws/viewer`, 뷰어가 `?ticket=` 를 붙인다 | `unauthorized` | Access |
+| E-07 | POST `/api/sessions` | `{device_id, viewer_id}` | `{session_id, ice_servers:[stun, turn{urls,username,credential}]}` — 새 세션 201, 같은 뷰어의 열린 세션 200. TURN 자격 발급 실패는 500 `internal` | `device_offline`, `device_revoked`, `not_found` | Access |
 | E-08 | DELETE `/api/devices/{id}` | — | 204 | `not_found` | Access |
 | E-09 | GET `/api/access-log?before=` | — | `{items:[{session_id,device_id,viewer_id,viewer_ua,path,click_to_first_frame_ms,latency_p50_ms,reconnect_count,reconnect_ms_max,reconnect_ms[],restarts,new_session_used,encoder,started_at,ended_at,end_reason}], next}` | — | Access |
 | E-10 | GET `/agent/update/file?token=` | M-07 의 1회용 토큰(UPDATE_TOKEN_TTL_MIN) | R2 `webdesktop-releases` 의 파일 스트림 | `code_invalid`(토큰), `code_expired` | 토큰 |
@@ -91,6 +91,7 @@ paths:
         properties: {device_id: {type: string}, viewer_id: {type: string, format: uuid}}}}}}
       responses:
         '201': {content: {application/json: {schema: {type: object, properties: {session_id: {type: string}, ice_servers: {type: array}}}}}}
+        '200': {description: 같은 viewer_id 의 열린 세션(본문은 201 과 같음)}
         '409': {$ref: '#/components/responses/Problem'}
 components:
   responses:

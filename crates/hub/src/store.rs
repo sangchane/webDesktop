@@ -33,6 +33,25 @@ pub struct NewDevice<'a> {
     pub now: i64,
 }
 
+/// 세션 행 중 신호 중계·이어받기에 쓰는 칸.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionRow {
+    pub id: String,
+    pub device_id: String,
+    pub viewer_id: String,
+    pub ended_at: Option<i64>,
+}
+
+/// M-10 저장 값 (reconnect_ms 는 JSON 글로).
+pub struct Stats<'a> {
+    pub path: Option<&'a str>,
+    pub click_to_first_frame_ms: Option<u32>,
+    pub latency_p50_ms: Option<u32>,
+    pub reconnect_ms: &'a [u32],
+    pub restarts: u32,
+    pub new_session_used: bool,
+}
+
 pub struct Store(pub SqlStorage);
 
 #[derive(Deserialize)]
@@ -160,6 +179,80 @@ impl Store {
         self.0.exec(
             "UPDATE device SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)",
             vec![at.into(), id.into(), at.into()],
+        )?;
+        Ok(())
+    }
+}
+
+const SESSION_COLS: &str = "id, device_id, viewer_id, ended_at";
+
+impl Store {
+    /// E-07 이어받기 — `idx_session_open`.
+    pub fn session_open(&self, device_id: &str) -> worker::Result<Option<SessionRow>> {
+        Ok(self
+            .0
+            .exec(
+                &format!(
+                    "SELECT {SESSION_COLS} FROM session WHERE device_id = ? AND ended_at IS NULL"
+                ),
+                vec![device_id.into()],
+            )?
+            .to_array::<SessionRow>()?
+            .pop())
+    }
+
+    pub fn session_get(&self, id: &str) -> worker::Result<Option<SessionRow>> {
+        Ok(self
+            .0
+            .exec(
+                &format!("SELECT {SESSION_COLS} FROM session WHERE id = ?"),
+                vec![id.into()],
+            )?
+            .to_array::<SessionRow>()?
+            .pop())
+    }
+
+    pub fn session_insert(
+        &self,
+        id: &str,
+        device_id: &str,
+        viewer_id: &str,
+        viewer_ua: Option<&str>,
+        now: i64,
+    ) -> worker::Result<()> {
+        self.0.exec(
+            "INSERT INTO session (id, device_id, viewer_id, viewer_ua, started_at) VALUES (?, ?, ?, ?, ?)",
+            vec![id.into(), device_id.into(), viewer_id.into(), viewer_ua.into(), now.into()],
+        )?;
+        Ok(())
+    }
+
+    /// 열린 세션만 닫는다 — 두 번 닫아도 처음 사유가 남는다.
+    pub fn session_end(&self, id: &str, reason: &str, now: i64) -> worker::Result<()> {
+        self.0.exec(
+            "UPDATE session SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL",
+            vec![now.into(), reason.into(), id.into()],
+        )?;
+        Ok(())
+    }
+
+    /// M-10 — 마지막으로 받은 값으로 덮는다.
+    pub fn session_stats(&self, id: &str, s: &Stats) -> worker::Result<()> {
+        let json = serde_json::to_string(s.reconnect_ms)
+            .map_err(|e| worker::Error::RustError(e.to_string()))?;
+        self.0.exec(
+            "UPDATE session SET path = ?, click_to_first_frame_ms = ?, latency_p50_ms = ?, reconnect_count = ?,              reconnect_ms_max = ?, reconnect_ms_json = ?, restarts = ?, new_session_used = ? WHERE id = ?",
+            vec![
+                s.path.into(),
+                s.click_to_first_frame_ms.map(i64::from).into(),
+                s.latency_p50_ms.map(i64::from).into(),
+                (s.reconnect_ms.len() as i64).into(),
+                s.reconnect_ms.iter().max().map(|m| i64::from(*m)).into(),
+                json.into(),
+                i64::from(s.restarts).into(),
+                i64::from(s.new_session_used).into(),
+                id.into(),
+            ],
         )?;
         Ok(())
     }

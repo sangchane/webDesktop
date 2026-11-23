@@ -12,7 +12,7 @@
 | 부품 | 파일 | 이번 범위 | 미룸(다음 작업) |
 |---|---|---|---|
 | 공유 계약 | `crates/proto/src/lib.rs` | 05 의 E-03·E-04·E-05·E-06·E-07, M-01~M-04·M-09·M-10, D-01·D-02·D-03·D-08 메시지 타입, 오류 이름 전체, 꼴 검사(`validate()`·`parse()`) — 웹앱도 같은 크레이트 | M-05~M-08·M-11~M-13, D-04~D-07 |
-| 허브 | `crates/hub/` (Worker + DO `Hub`) | `/healthz`, 정적 웹앱, Access JWT 검증, 등록 코드(활성 1개), `/agent/install/windows?t=`, `/agent/enroll`, `/agent/ws`(nonce 서명), `/api/ws`, `/api/devices`, `/api/sessions`(TURN 자격 + 이어받기), 신호 중계, `session.viewer_stats` 저장, 오프라인 판정, ping 자동 응답 | 접속 기록 화면 E-09·기기 제거 E-08·업데이트 E-10·만료 정리 알람·VPN |
+| 허브 | `crates/hub/` (Worker + DO `Hub`) | `/healthz`, 정적 웹앱, Access JWT 검증, 등록 코드(활성 1개), `/agent/install/windows?t=`, `/agent/enroll`, `/agent/ws`(nonce 서명), `/api/ws-ticket` + `/ws/viewer`(DL-10), `/api/devices`, `/api/sessions`(TURN 자격 + 이어받기), 신호 중계, `session.viewer_stats` 저장, 오프라인 판정, ping 자동 응답 | 접속 기록 화면 E-09·기기 제거 E-08·업데이트 E-10·만료 정리 알람·VPN |
 | 웹앱 | `crates/web/` (Rust → wasm, Leptos CSR, trunk — DL-13) | 목록·기기 추가(코드·설치 링크)·원격 화면(WebRTC 수신), 입력 변환기(마우스·터치 트랙패드·`text` 한글·특수키 막대 최소: Esc·Tab·Ctrl·Alt·Win·Del), `?relay=1`, M-10 계측(첫 프레임·SC-003 측정법) | 클립보드·모니터 선택·화질·Keyboard Lock·접속 기록 화면 |
 | 에이전트 | `crates/agent/` (Windows, 콘솔 실행) | 설정 파일·Ed25519 키(DPAPI + 파일 ACL), 등록(코드 입력 프롬프트), 허브 WS·재접속, 세션: DXGI Desktop Duplication(기본 모니터) → `openh264` → `str0m` H.264 트랙, DataChannel 입력 → `SendInput`(마우스·HID 키·유니코드 글자), D-08 `input.applied` | Windows 서비스·SYSTEM 도우미·보안 데스크톱(첫 작업 2), HW 인코더, macOS(첫 작업 3), 자동 업데이트 |
 

@@ -137,6 +137,8 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | SAVER_BITRATE_KBPS | 1000 | kbps | 설계 결정 DL-7 (R9) |
 | AGENT_HEARTBEAT_SEC | 30 | 초 | 설계 결정 DL-7 (Jump 59초 관찰 — local-inspection J3) |
 | TURN_CRED_TTL_MIN | 60 | 분 | 설계 결정 DL-7 |
+| WS_TICKET_TTL_SEC | 60 | 초(뷰어 입장권, 1회용) | 설계 결정 DL-10 (05 E-13) |
+| VIEWER_UA_MAX | 256 | 글자(접속 기록의 뷰어 User-Agent) | 설계 결정 DL-15 |
 | TURN_FREE_GB | 1000 | GB/월 | 출처 https://www.cloudflare.com/products/turn-sfu/ |
 | VPN_SUBNET | 10.233.0.0/16 | IPv4 대역 | 설계 결정 DL-7 (Tailscale 100.64.0.0/10 과 겹치지 않게) |
 | UPDATE_SIGN_ALG | Ed25519 | 서명 방식 | 설계 결정 DL-7 |

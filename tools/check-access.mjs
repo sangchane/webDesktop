@@ -9,6 +9,9 @@ const checks = [
   // /agent/* 는 로그인 없이 허브가 직접 답한다(Access 화면이 아니라 Problem JSON).
   ['hub /agent/enroll 은 공개(꼴 검사 400)', [`${HUB}/agent/enroll`, { method: 'POST', body: '{}' }], (r) => r.status === 400],
   ['hub /agent/install 은 공개(토큰 거절 400)', `${HUB}/agent/install/windows?t=x`, (r) => r.status === 400],
+  // T5: 입장권은 Access 뒤에서만 받고, 뷰어 WS 는 입장권 없이는 401.
+  ['app /api/ws-ticket 은 Access 로그인으로 보냄', [`${APP}/api/ws-ticket`, { method: 'POST', body: '{}' }], (r) => r.status === 302 && /cloudflareaccess\.com/.test(r.headers.get('location') ?? '')],
+  ['hub /ws/viewer 는 입장권 없이 401', `${HUB}/ws/viewer?ticket=x`, (r) => r.status === 401],
 ];
 let fail = 0;
 for (const [name, url, ok] of checks) {

@@ -1,7 +1,8 @@
 //! 서비스 계층 — 등록·오프라인 판정·빈도 규칙. 순수 함수(시계·난수는 인자로) — SQL·HTTP 없음.
 use proto::{
-    ErrorType, INSTALL_LINK_TTL_MIN, OFFLINE_DETECT_SEC, OFFLINE_WARN_HOURS, RATE_LIMIT_PER_MIN,
-    REG_CODE_ALPHABET, REG_CODE_LEN, REG_CODE_MAX_TRIES, REG_CODE_TTL_MIN,
+    EndReason, ErrorType, IceServer, INSTALL_LINK_TTL_MIN, OFFLINE_DETECT_SEC, OFFLINE_WARN_HOURS,
+    RATE_LIMIT_PER_MIN, REG_CODE_ALPHABET, REG_CODE_LEN, REG_CODE_MAX_TRIES, REG_CODE_TTL_MIN,
+    TURN_CRED_TTL_MIN, WS_TICKET_TTL_SEC,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -11,6 +12,8 @@ pub const CODE_TTL_MS: i64 = (REG_CODE_TTL_MIN * 60_000) as i64;
 pub const INSTALL_TTL_MS: i64 = (INSTALL_LINK_TTL_MIN * 60_000) as i64;
 pub const OFFLINE_MS: i64 = (OFFLINE_DETECT_SEC * 1000) as i64;
 const OFFLINE_WARN_MS: i64 = (OFFLINE_WARN_HOURS * 3_600_000) as i64;
+pub const TICKET_TTL_MS: i64 = (WS_TICKET_TTL_SEC * 1000) as i64;
+pub const TURN_TTL_SEC: u64 = TURN_CRED_TTL_MIN * 60;
 
 /// 활성 등록 코드 행 (enroll_code, id=1).
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +128,74 @@ impl RateLimit {
     }
 }
 
+/// E-13 1회용 입장권 — 해시 → (viewer_id, 만료).
+/// shortcut: DO 메모리라 발급과 사용 사이에 DO 가 내려가면 입장권이 사라진다(뷰어는 새로 받아 다시 붙음). 재접속 실패가 보이면 SQL 표로.
+#[derive(Default)]
+pub struct Tickets(HashMap<String, (String, i64)>);
+
+impl Tickets {
+    /// 만료 시각을 돌려준다. 지난 입장권은 이때 치운다.
+    pub fn issue(&mut self, token: &str, viewer_id: &str, now_ms: i64) -> i64 {
+        self.0.retain(|_, (_, exp)| *exp > now_ms);
+        let exp = now_ms + TICKET_TTL_MS;
+        self.0.insert(hash(token), (viewer_id.to_owned(), exp));
+        exp
+    }
+
+    /// 맞으면 viewer_id. 한 번 쓰면 지운다.
+    pub fn take(&mut self, token: &str, now_ms: i64) -> Result<String, ErrorType> {
+        match self.0.remove(&hash(token)) {
+            Some((viewer_id, exp)) if now_ms < exp => Ok(viewer_id),
+            _ => Err(ErrorType::Unauthorized),
+        }
+    }
+}
+
+/// E-07 멱등·이어받기 (05 「규약」).
+#[derive(Debug, PartialEq)]
+pub enum SessionPlan {
+    /// 같은 뷰어의 열린 세션 → 그 세션을 돌려준다.
+    Reuse,
+    /// 다른 뷰어의 열린 세션 → `taken_over` 로 닫고 새로.
+    TakeOver,
+    New,
+}
+
+pub fn session_plan(open_viewer: Option<&str>, viewer_id: &str) -> SessionPlan {
+    match open_viewer {
+        Some(v) if v == viewer_id => SessionPlan::Reuse,
+        Some(_) => SessionPlan::TakeOver,
+        None => SessionPlan::New,
+    }
+}
+
+/// 보낸 쪽이 쓸 수 있는 종료 사유. taken_over·device_revoked 는 허브만.
+pub fn end_reason_ok(reason: EndReason, from_agent: bool) -> bool {
+    match reason {
+        EndReason::Failed => true,
+        EndReason::ViewerClosed => !from_agent,
+        EndReason::HostClosed | EndReason::HostShutdown => from_agent,
+        EndReason::TakenOver | EndReason::DeviceRevoked => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct TurnResp {
+    #[serde(rename = "iceServers")]
+    ice_servers: Vec<IceServer>,
+}
+
+/// Cloudflare TURN `generate-ice-servers` 응답 → ICE 서버. 포트 53 주소는 브라우저가 막아 시간만 끌므로 뺀다(TURN 문서 Note).
+pub fn ice_servers(body: &str) -> Option<Vec<IceServer>> {
+    let mut r: TurnResp = serde_json::from_str(body).ok()?;
+    for s in &mut r.ice_servers {
+        s.urls
+            .retain(|u| !u.split('?').next().unwrap_or(u).ends_with(":53"));
+    }
+    r.ice_servers.retain(|s| !s.urls.is_empty());
+    (!r.ice_servers.is_empty()).then_some(r.ice_servers)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +282,50 @@ mod tests {
         assert!(!rl.hit("ip", 59_999));
         assert!(rl.hit("other", 0));
         assert!(rl.hit("ip", 60_000));
+    }
+
+    #[test]
+    fn ticket_is_single_use_and_expires() {
+        let mut t = Tickets::default();
+        let exp = t.issue("a", "v1", 0);
+        assert_eq!(exp, TICKET_TTL_MS);
+        assert_eq!(t.take("a", 1), Ok("v1".into()));
+        assert_eq!(t.take("a", 1), Err(ErrorType::Unauthorized));
+        t.issue("b", "v1", 0);
+        assert_eq!(t.take("b", TICKET_TTL_MS), Err(ErrorType::Unauthorized));
+        assert_eq!(t.take("nope", 0), Err(ErrorType::Unauthorized));
+    }
+
+    #[test]
+    fn session_plan_rules() {
+        assert_eq!(session_plan(None, "a"), SessionPlan::New);
+        assert_eq!(session_plan(Some("a"), "a"), SessionPlan::Reuse);
+        assert_eq!(session_plan(Some("b"), "a"), SessionPlan::TakeOver);
+    }
+
+    #[test]
+    fn end_reason_by_side() {
+        assert!(end_reason_ok(EndReason::ViewerClosed, false));
+        assert!(!end_reason_ok(EndReason::ViewerClosed, true));
+        assert!(end_reason_ok(EndReason::HostShutdown, true));
+        assert!(!end_reason_ok(EndReason::HostClosed, false));
+        assert!(!end_reason_ok(EndReason::TakenOver, false));
+        assert!(!end_reason_ok(EndReason::DeviceRevoked, true));
+        assert!(end_reason_ok(EndReason::Failed, true));
+    }
+
+    #[test]
+    fn ice_servers_drop_port_53() {
+        let body = r#"{"iceServers":[{"urls":["stun:stun.cloudflare.com:3478","stun:stun.cloudflare.com:53"]},
+            {"urls":["turn:turn.cloudflare.com:53?transport=udp","turns:turn.cloudflare.com:443?transport=tcp"],"username":"u","credential":"c"}]}"#;
+        let s = ice_servers(body).unwrap();
+        assert_eq!(s[0].urls, vec!["stun:stun.cloudflare.com:3478"]);
+        assert_eq!(
+            s[1].urls,
+            vec!["turns:turn.cloudflare.com:443?transport=tcp"]
+        );
+        assert_eq!(s[1].username.as_deref(), Some("u"));
+        assert!(ice_servers(r#"{"iceServers":[]}"#).is_none());
+        assert!(ice_servers("{").is_none());
     }
 }

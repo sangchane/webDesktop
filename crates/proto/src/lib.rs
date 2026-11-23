@@ -25,6 +25,11 @@ pub const AGENT_HEARTBEAT_SEC: u64 = 30;
 pub const OFFLINE_DETECT_SEC: u64 = 90;
 pub const OFFLINE_WARN_HOURS: u64 = 24;
 pub const RATE_LIMIT_PER_MIN: u32 = 60;
+pub const TURN_CRED_TTL_MIN: u64 = 60;
+/// E-13 뷰어 입장권 수명(1회용).
+pub const WS_TICKET_TTL_SEC: u64 = 60;
+/// 접속 기록에 남기는 뷰어 User-Agent 글자 수 상한.
+pub const VIEWER_UA_MAX: usize = 256;
 
 /// E-05 서명 대상 = nonce 글자 바이트 ‖ device_id 글자 바이트. 허브·에이전트가 같은 함수를 쓴다.
 pub fn auth_message(nonce: &str, device_id: &str) -> Vec<u8> {
