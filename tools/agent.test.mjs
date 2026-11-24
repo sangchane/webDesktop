@@ -26,7 +26,9 @@ after(async () => {
   await browser?.close();
   for (const a of running) a.p.kill();
   stopStack();
-  rmSync(HOME, { recursive: true, force: true });
+  // KEEP_AGENT_HOME=1 이면 에이전트 로그를 남겨 둔다(지연 단계 시간 보기).
+  if (process.env.KEEP_AGENT_HOME) console.log(`에이전트 폴더 ${HOME}`);
+  else rmSync(HOME, { recursive: true, force: true });
 });
 
 function agent() {

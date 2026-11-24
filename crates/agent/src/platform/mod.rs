@@ -2,6 +2,8 @@
 #[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
+pub mod encode;
+#[cfg(windows)]
 pub mod inject;
 #[cfg(windows)]
 mod windows;

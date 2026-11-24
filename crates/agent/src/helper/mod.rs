@@ -268,6 +268,7 @@ fn run(
         }
 
         // 3. 화면 — 바뀌었거나, 키프레임 요청이거나, VIDEO_IDLE_RESEND_MS 동안 안 보냈으면 보낸다. 끊긴 동안은 쉰다.
+        let mut wrote = false;
         if connected && down_since.is_none() && now >= next_frame {
             next_frame = now + every;
             // 못 열면 1초 뒤 다시, 로그는 한 번만(앞 도우미가 복제를 쥐고 있거나 화면이 잠김).
@@ -309,6 +310,7 @@ fn run(
                     if let Some(w) = rtc.writer(mid) {
                         let zero = MediaTime::from_hundredths(0);
                         w.playout_delay(zero, zero).write(pt, now, ts, bits)?;
+                        wrote = true;
                     }
                     last_sent = Some(now);
                     // D-08: 주입 뒤 처음 인코딩한 프레임의 RTP 타임스탬프(str0m 은 이 값을 그대로 쓴다).
@@ -330,6 +332,11 @@ fn run(
             if let Some(t) = pending.iter().map(|p| p.1).min() {
                 next_frame = next_frame.min((t + every).max(now + Duration::from_millis(1)));
             }
+        }
+
+        // 방금 쓴 화면·D-08 은 2단계(poll_output)에서야 나간다 — 기다리지 말고 바로 내보낸다(전엔 다음 박자까지 최대 33ms 묵음).
+        if wrote {
+            continue;
         }
 
         // 4. UDP 를 기다린다 — 다음 시한·다음 프레임 중 빠른 쪽까지, 신호를 놓치지 않게 길어야 50ms.

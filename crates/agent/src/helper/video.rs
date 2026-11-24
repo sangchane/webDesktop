@@ -1,7 +1,10 @@
 //! 캡처 한 장 → 줄이기 → H.264(openh264). 줄이기·크기 계산은 순수 함수로 떼어 시험한다.
+#[cfg(windows)]
+use crate::platform::encode::{i420_to_nv12, HwH264};
 use openh264::encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, Level, UsageType};
-use openh264::formats::{BgraSliceU8, YUVBuffer};
+use openh264::formats::{BgraSliceU8, YUVBuffer, YUVSource};
 use openh264::OpenH264API;
+use tracing::{info, warn};
 
 /// 03 상수 표.
 pub const VIDEO_MAX_EDGE: usize = 2560;
@@ -36,6 +39,11 @@ pub fn shrink(bgra: &[u8], w: usize, h: usize) -> (usize, usize, Vec<u8>) {
 
 pub struct Video {
     enc: Option<(Encoder, usize, usize)>,
+    /// 하드웨어 인코더(먼저 씀). 한 번 실패하면 이 세션은 openh264 로만.
+    #[cfg(windows)]
+    hw: Option<(HwH264, usize, usize)>,
+    hw_off: bool,
+    nv12: Vec<u8>,
     /// 마지막 화면(줄여 YUV 로 바꾼 것) — 화면이 안 바뀌어도 키프레임·유지 재전송에 쓴다.
     /// 바뀔 때 한 번만 바꿔 둔다 — 다시 보낼 때마다 1080p 를 다시 바꾸면 프레임마다 수십 ms 든다(지연 개선 2026-11-24).
     last: Option<(usize, usize, YUVBuffer)>,
@@ -46,6 +54,10 @@ impl Video {
     pub fn new() -> Self {
         Self {
             enc: None,
+            #[cfg(windows)]
+            hw: None,
+            hw_off: false,
+            nv12: vec![],
             last: None,
             keyframe: true,
         }
@@ -68,6 +80,25 @@ impl Video {
         let Some((w, h, yuv)) = &self.last else {
             return Ok(None);
         };
+        #[cfg(windows)]
+        if !self.hw_off {
+            match encode_hw(
+                &mut self.hw,
+                &mut self.nv12,
+                &mut self.keyframe,
+                *w,
+                *h,
+                yuv,
+            ) {
+                Ok(bits) => return Ok(bits),
+                Err(e) => {
+                    warn!(event = "video.hw_failed", why = %e);
+                    self.hw = None;
+                    self.hw_off = true;
+                    self.keyframe = true;
+                }
+            }
+        }
         if self.enc.as_ref().is_none_or(|e| (e.1, e.2) != (*w, *h)) {
             let cfg = EncoderConfig::new()
                 .bitrate(BitRate::from_bps(VIDEO_BITRATE_KBPS * 1000))
@@ -79,6 +110,7 @@ impl Video {
                 // 비트레이트가 넘쳐도 장을 버리지 않는다 — 버린 장은 다음 장까지(최대 1초) 화면이 늦는다.
                 .skip_frames(false)
                 .level(Level::Level_5_1); // 03 H264_MAX_LEVEL
+            info!(event = "video.encoder", kind = "sw", w, h);
             self.enc = Some((
                 Encoder::with_api_config(OpenH264API::from_source(), cfg)?,
                 *w,
@@ -93,6 +125,29 @@ impl Video {
         let bits = enc.encode(yuv)?.to_vec();
         Ok((!bits.is_empty()).then_some(bits))
     }
+}
+
+/// 하드웨어 인코더로 한 장. 크기가 바뀌면 새로 만든다.
+#[cfg(windows)]
+fn encode_hw(
+    hw: &mut Option<(HwH264, usize, usize)>,
+    nv12: &mut Vec<u8>,
+    keyframe: &mut bool,
+    w: usize,
+    h: usize,
+    yuv: &YUVBuffer,
+) -> windows::core::Result<Option<Vec<u8>>> {
+    if hw.as_ref().is_none_or(|e| (e.1, e.2) != (w, h)) {
+        *hw = None;
+        let e = HwH264::new(w as u32, h as u32, VIDEO_FPS, VIDEO_BITRATE_KBPS * 1000)?;
+        info!(event = "video.encoder", kind = "hw", name = %e.name, w, h);
+        *hw = Some((e, w, h));
+        *keyframe = true;
+    }
+    i420_to_nv12(yuv.y(), yuv.u(), yuv.v(), nv12);
+    let enc = &mut hw.as_mut().expect("위에서 채움").0;
+    let bits = enc.encode(nv12, std::mem::take(keyframe))?;
+    Ok((!bits.is_empty()).then_some(bits))
 }
 
 #[cfg(test)]
