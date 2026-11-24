@@ -1,11 +1,12 @@
 //! 상주 계층 — 설정·기기 키·등록(E-04)·허브 서명 WS(E-05)·재접속 (04 「코드 구조」 resident).
-use crate::platform;
+use crate::{helper, platform};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
-use proto::{EnrollReq, EnrollResp, ErrorType, Os, Problem, WsMsg, PROTO_MAJOR};
+use proto::{EnrollReq, EnrollResp, ErrorType, IceServer, Os, Problem, WsMsg, PROTO_MAJOR};
 use serde::{Deserialize, Serialize};
-use std::{io::BufRead, path::PathBuf, time::Duration};
+use std::{collections::HashMap, io::BufRead, path::PathBuf, sync::mpsc, time::Duration};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::{interval_at, sleep, sleep_until, timeout, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
@@ -271,11 +272,125 @@ fn next_wait(sec: u64) -> u64 {
     (sec * 2).min(AGENT_RECONNECT_MAX_SEC)
 }
 
+struct Live {
+    tx: mpsc::Sender<helper::Cmd>,
+    ice: Vec<IceServer>,
+    offered: bool,
+    /// 도우미 세대 — 같은 세션의 앞 도우미가 늦게 보낸 글을 가린다.
+    gen: u64,
+}
+
+/// 열린 세션(도우미 실)과 도우미가 허브로 보낼 신호. 허브 재접속을 넘어 산다 — WebRTC 는 허브 없이 이어진다(DL-15 ③).
+struct Sessions {
+    live: HashMap<String, Live>,
+    gen: u64,
+    tx: UnboundedSender<(u64, WsMsg)>,
+    rx: UnboundedReceiver<(u64, WsMsg)>,
+}
+
+impl Sessions {
+    fn new() -> Self {
+        let (tx, rx) = unbounded_channel();
+        Self {
+            live: HashMap::new(),
+            gen: 0,
+            tx,
+            rx,
+        }
+    }
+
+    /// 도우미가 보낸 글을 허브로 보낼지 — 지금 세대의 것만. session.end 면 목록에서도 뺀다.
+    fn forward(&mut self, gen: u64, m: &WsMsg) -> bool {
+        let sid = match m {
+            WsMsg::SignalAnswer { session_id, .. }
+            | WsMsg::SignalCandidate { session_id, .. }
+            | WsMsg::SessionEnd { session_id, .. } => session_id,
+            _ => return false,
+        };
+        if self.live.get(sid).is_none_or(|l| l.gen != gen) {
+            return false;
+        }
+        if matches!(m, WsMsg::SessionEnd { .. }) {
+            self.live.remove(sid);
+        }
+        true
+    }
+
+    fn open(&mut self, session_id: String, ice: Vec<IceServer>) {
+        self.gen += 1;
+        let tx = helper::start(session_id.clone(), ice.clone(), self.gen, self.tx.clone());
+        self.live.insert(
+            session_id,
+            Live {
+                tx,
+                ice,
+                offered: false,
+                gen: self.gen,
+            },
+        );
+    }
+
+    fn send(&self, session_id: &str, c: helper::Cmd) {
+        match self.live.get(session_id) {
+            Some(l) => {
+                let _ = l.tx.send(c);
+            }
+            None => warn!(event = "session.unknown", session_id),
+        }
+    }
+
+    /// 허브 → 에이전트 세션 메시지(M-02·M-03·M-04).
+    fn on_hub(&mut self, m: WsMsg) {
+        match m {
+            // 이미 아는 세션이면 거른다(DL-15 ⑤ — 허브는 이어받기 때 다시 보낸다).
+            WsMsg::SessionStart {
+                session_id,
+                ice_servers,
+            } => {
+                if !self.live.contains_key(&session_id) {
+                    info!(event = "session.start", session_id);
+                    self.open(session_id, ice_servers);
+                }
+            }
+            WsMsg::SignalOffer { session_id, sdp } => {
+                // 같은 세션의 두 번째 offer = 같은 뷰어가 새 연결로 다시 엶(200 재사용) → 도우미를 새로.
+                // shortcut: 같은 연결의 ICE 재시작 offer 도 새로 띄움 — 웹앱이 ICE 재시작(FR-010)을 넣을 때 가려 받는다.
+                if let Some(l) = self.live.get(&session_id).filter(|l| l.offered) {
+                    let ice = l.ice.clone();
+                    let _ = l.tx.send(helper::Cmd::End);
+                    self.open(session_id.clone(), ice);
+                }
+                if let Some(l) = self.live.get_mut(&session_id) {
+                    l.offered = true;
+                }
+                self.send(&session_id, helper::Cmd::Offer(sdp));
+            }
+            WsMsg::SignalCandidate {
+                session_id,
+                candidate,
+            } => self.send(&session_id, helper::Cmd::Candidate(candidate)),
+            // 새 offer 가 signal.offer 로 따로 온다.
+            WsMsg::SignalRestart { .. } => {}
+            WsMsg::SessionEnd { session_id, reason } => {
+                info!(event = "session.end", session_id, reason = ?reason);
+                if let Some(l) = self.live.remove(&session_id) {
+                    let _ = l.tx.send(helper::Cmd::End);
+                }
+            }
+            // 내용(TURN 자격·SDP)은 로그에 남기지 않고 종류만.
+            m => {
+                info!(event = "hub.msg", t = %serde_json::to_value(&m).ok().and_then(|v| v["t"].as_str().map(str::to_owned)).unwrap_or_default())
+            }
+        }
+    }
+}
+
 /// 허브에 붙어 있고, 끊기면 다시 붙는다. 멈출 사유가 생길 때만 돌아온다.
 pub async fn run(cfg: &Config, key: &SigningKey) -> Stop {
     let mut wait = 1;
+    let mut sessions = Sessions::new();
     loop {
-        match connect(cfg, key).await {
+        match connect(cfg, key, &mut sessions).await {
             Outcome::Stop(s) => return s,
             Outcome::Retry { healthy, why } => {
                 if healthy {
@@ -290,7 +405,7 @@ pub async fn run(cfg: &Config, key: &SigningKey) -> Stop {
     }
 }
 
-async fn connect(cfg: &Config, key: &SigningKey) -> Outcome {
+async fn connect(cfg: &Config, key: &SigningKey, sessions: &mut Sessions) -> Outcome {
     let beat = Duration::from_secs(proto::AGENT_HEARTBEAT_SEC);
     let silent = Duration::from_secs(proto::OFFLINE_DETECT_SEC);
     let mut ws = match timeout(beat, tokio_tungstenite::connect_async(ws_url(&cfg.hub_url))).await {
@@ -336,6 +451,16 @@ async fn connect(cfg: &Config, key: &SigningKey) -> Outcome {
             _ = sleep_until(last_rx + silent) => {
                 return Outcome::Retry { healthy, why: "허브 응답 없음".into() };
             }
+            // 도우미가 보낼 신호(answer·session.end). 끊겨 있는 동안 쌓인 것은 다시 붙은 뒤 나간다.
+            Some((gen, m)) = sessions.rx.recv() => {
+                if !sessions.forward(gen, &m) {
+                    continue;
+                }
+                let m = serde_json::to_string(&m).expect("WsMsg 직렬화");
+                if let Err(e) = ws.send(Message::text(m)).await {
+                    return Outcome::Retry { healthy, why: e.to_string() };
+                }
+            }
             m = ws.next() => { last_rx = Instant::now(); match m {
                 None => return Outcome::Retry { healthy, why: "연결 닫힘".into() },
                 Some(Err(e)) => return Outcome::Retry { healthy, why: e.to_string() },
@@ -358,8 +483,7 @@ async fn connect(cfg: &Config, key: &SigningKey) -> Outcome {
                             return Outcome::Stop(s);
                         }
                     }
-                    // 세션 메시지는 T9(도우미). 내용(TURN 자격·SDP)은 로그에 남기지 않고 종류만.
-                    Ok(m) => info!(event = "hub.msg", t = %serde_json::to_value(&m).ok().and_then(|v| v["t"].as_str().map(str::to_owned)).unwrap_or_default()),
+                    Ok(m) => sessions.on_hub(m),
                     Err(kind) => warn!(event = "hub.bad_msg", kind = ?kind),
                 },
                 Some(Ok(_)) => {}
@@ -372,6 +496,35 @@ async fn connect(cfg: &Config, key: &SigningKey) -> Outcome {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signature, Verifier};
+
+    #[test]
+    fn only_current_helper_generation_is_forwarded() {
+        let mut s = Sessions::new();
+        let (tx, _rx) = mpsc::channel();
+        s.live.insert(
+            "s1".into(),
+            Live {
+                tx,
+                ice: vec![],
+                offered: true,
+                gen: 2,
+            },
+        );
+        let end = WsMsg::SessionEnd {
+            session_id: "s1".into(),
+            reason: proto::EndReason::Failed,
+        };
+        let answer = WsMsg::SignalAnswer {
+            session_id: "s1".into(),
+            sdp: "v=0".into(),
+        };
+        assert!(!s.forward(1, &end), "앞 도우미의 늦은 end 는 버림");
+        assert!(s.live.contains_key("s1"));
+        assert!(s.forward(2, &answer));
+        assert!(s.forward(2, &end));
+        assert!(!s.live.contains_key("s1"));
+        assert!(!s.forward(2, &answer), "닫힌 세션의 글은 버림");
+    }
 
     #[test]
     fn code_is_normalized() {

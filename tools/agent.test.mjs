@@ -1,22 +1,27 @@
-// 에이전트 시험 (tasks T8) — 실제 에이전트 실행 파일을 로컬 허브에 등록하고 목록에서 「켜짐」을 본다.
+// 에이전트 시험 (tasks T8·T9) — 실제 에이전트 실행 파일을 로컬 허브에 등록하고 목록에서 「켜짐」을 본다.
+// T9: 시험 브라우저가 뷰어가 되어 이 PC 의 실제 화면(DXGI → H.264)을 받고, 입력 채널로 보낸 입력에 input.applied 가 오는지 본다.
+// 주의: 에이전트는 이 PC 에 진짜 입력을 넣는다 — 시험은 호스트에 효과가 없는 키(HID 0x90, 표에 없음)만 보낸다.
 // 실행: node --test tools/agent.test.mjs  (처음엔 Worker·에이전트를 빌드하느라 몇 분 걸린다)
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
-import { ROOT, HUB, OFFLINE, api, startStack, stopStack } from './stack.mjs';
+import { chromium } from 'playwright';
+import { ROOT, HUB, OFFLINE, api, open, until, startStack, stopStack } from './stack.mjs';
 
 const EXE = join(ROOT, 'target/debug/webdesktop-agent.exe');
 const HOME = mkdtempSync(join(tmpdir(), 'webdesktop-agent-'));
 const running = [];
+let browser;
 
 before(async () => {
   execSync('cargo build -q -p agent', { cwd: ROOT, stdio: 'inherit', env: { ...process.env, PATH: `${join(homedir(), '.cargo', 'bin')};${process.env.PATH}` } });
   await startStack();
 });
-after(() => {
+after(async () => {
+  await browser?.close();
   for (const a of running) a.p.kill();
   stopStack();
   rmSync(HOME, { recursive: true, force: true });
@@ -79,6 +84,74 @@ test('다시 실행하면 코드 없이 저장한 키로 붙음, 기기는 하�
   await waitFor('다시 켜짐', online);
   assert.ok(!again.out.includes('등록 코드'), again.out);
   assert.equal((await api('/api/devices')).body.length, 1);
+});
+
+test('실제 화면: 뷰어 offer → 에이전트 answer → H.264 프레임, 입력 → input.applied', async (t) => {
+  const dev = (await api('/api/devices')).body[0];
+  const viewer_id = 'viewer-e2e';
+  const tk = (await api('/api/ws-ticket', { method: 'POST', body: { viewer_id } })).body;
+  const v = open(`${tk.hub_ws_url}?ticket=${tk.ticket}`);
+  await v.opened;
+  v.ws.send(JSON.stringify({ t: 'viewer.hello', viewer_id, proto: 1 }));
+  const s = (await api('/api/sessions', { method: 'POST', body: { device_id: dev.id, viewer_id } })).body;
+  assert.ok(s.session_id, JSON.stringify(s));
+
+  browser = await chromium.launch();
+  const page = await browser.newPage();
+  await page.exposeFunction('toHub', (m) => v.ws.send(JSON.stringify(m)));
+  // 웹앱(session.rs)과 같은 꼴: recvonly 영상 + input·control 채널, 뷰어가 offer. 같은 PC 라 TURN 없이 호스트 후보로.
+  const offer = await page.evaluate(async (sid) => {
+    const pc = (window.pc = new RTCPeerConnection());
+    window.applied = [];
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    window.input = pc.createDataChannel('input');
+    pc.createDataChannel('control').onmessage = (e) => window.applied.push(JSON.parse(e.data));
+    pc.onicecandidate = (e) =>
+      e.candidate?.candidate && window.toHub({ t: 'signal.candidate', session_id: sid, candidate: e.candidate.candidate });
+    pc.ontrack = (e) => {
+      const el = Object.assign(document.createElement('video'), { muted: true, srcObject: new MediaStream([e.track]) });
+      document.body.append(el);
+      el.play();
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    return pc.localDescription.sdp;
+  }, s.session_id);
+  v.ws.send(JSON.stringify({ t: 'signal.offer', session_id: s.session_id, sdp: offer }));
+  const answer = await until(v, (m) => m.t === 'signal.answer', 20_000);
+  await page.evaluate((sdp) => window.pc.setRemoteDescription({ type: 'answer', sdp }), answer.sdp);
+
+  const agentLog = () => readdirSync(join(HOME, 'logs')).map((f) => readFileSync(join(HOME, 'logs', f), 'utf8')).join('');
+  const video = await waitFor(
+    '영상 프레임 디코딩',
+    () =>
+      page.evaluate(async () => {
+        const r = await window.pc.getStats();
+        for (const x of r.values()) {
+          if (x.type === 'inbound-rtp' && x.kind === 'video' && x.framesDecoded > 0) {
+            return { w: x.frameWidth, h: x.frameHeight, codec: r.get(x.codecId)?.mimeType };
+          }
+        }
+        return null;
+      }),
+    30_000,
+  ).catch((e) => {
+    // 화면이 잠겼거나 디스플레이가 꺼져 있으면 이 PC 에서는 캡처를 못 연다 — 실패가 아니라 건너뜀.
+    if (agentLog().includes('capture.open_failed')) return null;
+    throw e;
+  });
+  if (!video) return t.skip('이 PC 화면을 캡처하지 못함(잠김·디스플레이 꺼짐) — 에이전트 로그 capture.open_failed');
+  assert.equal(video.codec, 'video/H264');
+  assert.ok(video.w >= 640 && video.w <= 2560 && video.h >= 360, JSON.stringify(video)); // VIDEO_MAX_EDGE
+
+  await page.evaluate(() => window.input.readyState === 'open' || new Promise((r) => (window.input.onopen = r)));
+  await page.evaluate(() => window.input.send(JSON.stringify({ t: 'key', seq: 7, hid_usage: 0x90, down: true })));
+  // 화면이 안 바뀌어도 VIDEO_IDLE_RESEND_MS(1초) 안에 다음 프레임이 나간다.
+  const applied = await waitFor('input.applied', () => page.evaluate(() => window.applied.find((a) => a.seq === 7)), 5_000);
+  assert.equal(applied.t, 'input.applied');
+  assert.ok(Number.isInteger(applied.rtp_ts));
+
+  v.ws.send(JSON.stringify({ t: 'session.end', session_id: s.session_id, reason: 'viewer_closed' }));
+  console.log(`실제 화면 ${video.w}x${video.h} ${video.codec}, input.applied rtp_ts=${applied.rtp_ts}`);
 });
 
 test('같은 기기로 두 번째 에이전트가 붙으면 앞 에이전트가 끝남', async () => {

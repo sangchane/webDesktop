@@ -18,18 +18,23 @@ ed25519-dalek = "3"
 getrandom = "0.4"
 # TLS 는 OS 것(Windows SChannel) — ring·aws-lc 빌드를 피한다.
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
-tokio = { version = "1", features = ["rt", "time", "macros", "net"] }
+tokio = { version = "1", features = ["rt", "time", "macros", "net", "sync"] }
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 tracing-appender = "0.2"
+str0m = { version = "0.26.0", default-features = false, features = ["wincrypto"] }
+openh264 = "0.9.10"
 
 [target.'cfg(windows)'.dependencies]
+# 화면 캡처(DXGI·D3D11 COM) — COM 감싸개가 있는 windows 크레이트. 나머지 OS 호출은 windows-sys.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
+  "Win32_UI_Input_KeyboardAndMouse",
 ] }

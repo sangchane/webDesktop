@@ -1,5 +1,6 @@
 //! WebDesktop 에이전트(Windows, 콘솔 실행 — 서비스는 첫 작업 2).
 //! 등록 코드를 한 번 입력하면 그 뒤로는 저장한 키로 허브에 붙어 있다.
+mod helper;
 mod platform;
 mod resident;
 
@@ -26,6 +27,8 @@ fn init_log(home: &Home) -> Option<tracing_appender::non_blocking::WorkerGuard> 
 }
 
 fn main() -> ExitCode {
+    // WebRTC DTLS·SRTP 는 Windows CNG(str0m wincrypto) — OpenSSL·aws-lc 빌드 없음.
+    str0m::crypto::from_feature_flags().install_process_default();
     let home = Home::from_env();
     // 부모(ProgramData)는 그대로, 우리 폴더는 보호 ACL 로 — 다른 로컬 사용자가 파일을 끼워 넣지 못하게.
     if let Err(e) = home
