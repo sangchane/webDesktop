@@ -35,9 +35,9 @@ if (!last) {
   console.log('세션 없음');
   process.exit(1);
 }
-const v = (x) => (x ?? '없음');
+const v = (x, unit = '') => (x == null ? '없음' : `${x}${unit}`);
 console.log(`세션 ${last.session_id} · 시작 ${last.started_at} · 끝 ${v(last.ended_at)} (${v(last.end_reason)})`);
 console.log(`뷰어 ${v(last.viewer_ua)}`);
-console.log(`첫 화면 ${v(last.click_to_first_frame_ms)}ms · 입력 지연 p50 ${v(last.latency_p50_ms)}ms · 재연결 ${last.reconnect_count}회`);
+console.log(`첫 화면 ${v(last.click_to_first_frame_ms, 'ms')} · 입력 지연 p50 ${v(last.latency_p50_ms, 'ms')} · 재연결 ${last.reconnect_count}회`);
 console.log(`path=${v(last.path)}`);
 process.exit(last.path ? 0 : 1);
