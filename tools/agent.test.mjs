@@ -133,7 +133,7 @@ test('실제 화면: 뷰어 offer → 에이전트 answer → H.264 프레임, �
       page.evaluate(async () => {
         const r = await window.pc.getStats();
         for (const x of r.values()) {
-          if (x.type === 'inbound-rtp' && x.kind === 'video' && x.framesDecoded > 0) {
+          if (x.type === 'inbound-rtp' && x.kind === 'video' && x.framesDecoded > 0 && x.frameWidth) {
             return { w: x.frameWidth, h: x.frameHeight, codec: r.get(x.codecId)?.mimeType };
           }
         }
@@ -147,6 +147,21 @@ test('실제 화면: 뷰어 offer → 에이전트 answer → H.264 프레임, �
   });
   if (!video) return t.skip('이 PC 화면을 캡처하지 못함(잠김·디스플레이 꺼짐) — 에이전트 로그 capture.open_failed');
   assert.equal(video.codec, 'video/H264');
+  // 그림이 실제 화면인지(검은·한 색 화면이 아닌지) — GPU 색 변환이 깨지면 여기서 걸린다. 그림 파일은 눈으로 볼 때.
+  const pic = await page.evaluate(() => {
+    const v = document.querySelector('video');
+    const c = Object.assign(document.createElement('canvas'), { width: 160, height: 90 });
+    const g = c.getContext('2d');
+    g.drawImage(v, 0, 0, 160, 90);
+    const d = g.getImageData(0, 0, 160, 90).data;
+    const ys = [];
+    for (let i = 0; i < d.length; i += 4) ys.push((d[i] + d[i + 1] + d[i + 2]) / 3);
+    const mean = ys.reduce((a, b) => a + b, 0) / ys.length;
+    return { mean: Math.round(mean), sd: Math.round(Math.sqrt(ys.reduce((a, y) => a + (y - mean) ** 2, 0) / ys.length)) };
+  });
+  await page.locator('video').screenshot({ path: join(HOME, 'frame.png') });
+  console.log(`화면 밝기 평균 ${pic.mean} · 퍼짐 ${pic.sd} · 그림 ${join(HOME, 'frame.png')}`);
+  assert.ok(pic.sd > 5, `한 색 화면: ${JSON.stringify(pic)}`);
   assert.ok(video.w >= 640 && video.w <= 2560 && video.h >= 360, JSON.stringify(video)); // VIDEO_MAX_EDGE
 
   await page.evaluate(() => window.input.readyState === 'open' || new Promise((r) => (window.input.onopen = r)));

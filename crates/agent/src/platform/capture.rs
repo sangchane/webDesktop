@@ -3,20 +3,23 @@ use windows::core::Interface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
     IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 
-/// BGRA 한 장(줄 사이 빈칸 없음).
+/// 한 장 — CPU 길이면 BGRA(줄 사이 빈칸 없음), GPU 길이면 그래픽카드 안의 사본(bgra 는 빈 채).
 pub struct Frame {
     pub width: usize,
     pub height: usize,
     pub bgra: Vec<u8>,
+    pub tex: Option<ID3D11Texture2D>,
 }
 
 pub struct Capturer {
@@ -25,6 +28,10 @@ pub struct Capturer {
     output: IDXGIOutput1,
     dup: Option<IDXGIOutputDuplication>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// GPU 길의 사본(복제 프레임은 곧 돌려줘야 해서 그래픽카드 안에서 한 번 복사해 둔다).
+    keep: Option<(ID3D11Texture2D, u32, u32)>,
+    /// true 면 CPU 로 읽지 않고 그래픽카드 안의 사본을 준다(하드웨어 인코더가 바로 받음).
+    pub gpu: bool,
 }
 
 /// 기본 모니터(바탕 화면 좌표 0,0 을 품은 출력)와 그 출력을 가진 어댑터.
@@ -53,34 +60,54 @@ fn primary_output() -> windows::core::Result<(IDXGIAdapter1, IDXGIOutput1)> {
 impl Capturer {
     pub fn new() -> windows::core::Result<Self> {
         let (adapter, output) = primary_output()?;
-        let mut device = None;
-        let mut ctx = None;
-        // SAFETY: 출력 포인터는 이 함수 안의 지역 변수.
-        unsafe {
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut ctx),
-            )?;
-        }
+        let create = |flags| {
+            let mut device = None;
+            let mut ctx = None;
+            // SAFETY: 출력 포인터는 이 함수 안의 지역 변수.
+            unsafe {
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    flags,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut ctx),
+                )
+                .map(|_| (device, ctx))
+            }
+        };
+        // 영상 처리기(BGRA→NV12)·하드웨어 인코더가 같은 장치를 쓰게 VIDEO_SUPPORT — 안 되는 드라이버면 없이.
+        let (device, ctx) =
+            create(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT)
+                .or_else(|_| create(D3D11_CREATE_DEVICE_BGRA_SUPPORT))?;
         let (Some(device), Some(ctx)) = (device, ctx) else {
             return Err(windows::core::Error::from(DXGI_ERROR_ACCESS_LOST));
         };
+        // Media Foundation 이 자기 실에서 같은 장치를 쓴다.
+        if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+            // SAFETY: COM 호출.
+            unsafe {
+                let _ = mt.SetMultithreadProtected(true);
+            }
+        }
         let mut c = Self {
             device,
             ctx,
             output,
             dup: None,
             staging: None,
+            keep: None,
+            gpu: false,
         };
         c.dup = Some(c.duplicate()?);
         Ok(c)
+    }
+
+    pub fn device(&self) -> ID3D11Device {
+        self.device.clone()
     }
 
     fn duplicate(&self) -> windows::core::Result<IDXGIOutputDuplication> {
@@ -115,7 +142,14 @@ impl Capturer {
         } else {
             res.ok_or_else(|| windows::core::Error::from(DXGI_ERROR_ACCESS_LOST))
                 .and_then(|r| r.cast::<ID3D11Texture2D>())
-                .and_then(|tex| self.read(&tex).map(Some))
+                .and_then(|tex| {
+                    if self.gpu {
+                        self.keep(&tex)
+                    } else {
+                        self.read(&tex)
+                    }
+                    .map(Some)
+                })
         };
         // SAFETY: 위에서 얻은 프레임을 돌려준다.
         unsafe {
@@ -124,7 +158,40 @@ impl Capturer {
         frame
     }
 
-    fn read(&mut self, tex: &ID3D11Texture2D) -> windows::core::Result<Frame> {
+    /// 그래픽카드 안에서 사본으로 복사만 한다.
+    fn keep(&mut self, tex: &ID3D11Texture2D) -> windows::core::Result<Frame> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: COM 호출, desc 는 지역 변수.
+        unsafe { tex.GetDesc(&mut desc) };
+        let (w, h) = (desc.Width, desc.Height);
+        if self.keep.as_ref().is_none_or(|k| (k.1, k.2) != (w, h)) {
+            let kd = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                MipLevels: 1,
+                ArraySize: 1,
+                ..desc
+            };
+            let mut t = None;
+            // SAFETY: COM 호출.
+            unsafe { self.device.CreateTexture2D(&kd, None, Some(&mut t))? };
+            self.keep = t.map(|t| (t, w, h));
+        }
+        let keep = self.keep.as_ref().expect("위에서 채움").0.clone();
+        // SAFETY: COM 호출 — 같은 크기·형식.
+        unsafe { self.ctx.CopyResource(&keep, tex) };
+        Ok(Frame {
+            width: w as usize,
+            height: h as usize,
+            bgra: vec![],
+            tex: Some(keep),
+        })
+    }
+
+    /// 그래픽카드의 한 장을 CPU 로 읽는다(GPU 길이 실패해 CPU 길로 넘어갈 때도 쓴다).
+    pub fn read(&mut self, tex: &ID3D11Texture2D) -> windows::core::Result<Frame> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: COM 호출, desc 는 지역 변수.
         unsafe { tex.GetDesc(&mut desc) };
@@ -163,6 +230,7 @@ impl Capturer {
             width: w as usize,
             height: h as usize,
             bgra,
+            tex: None,
         })
     }
 }

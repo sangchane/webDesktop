@@ -5,6 +5,10 @@ use openh264::encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, 
 use openh264::formats::{BgraSliceU8, YUVBuffer, YUVSource};
 use openh264::OpenH264API;
 use tracing::{info, warn};
+#[cfg(windows)]
+use windows::core::Interface;
+#[cfg(windows)]
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 
 /// 03 상수 표.
 pub const VIDEO_MAX_EDGE: usize = 2560;
@@ -44,6 +48,14 @@ pub struct Video {
     hw: Option<(HwH264, usize, usize)>,
     hw_off: bool,
     nv12: Vec<u8>,
+    /// GPU 길: 캡처 장치와 마지막 한 장(그래픽카드 안 사본, 줄이기 전 크기).
+    #[cfg(windows)]
+    device: Option<ID3D11Device>,
+    #[cfg(windows)]
+    tex: Option<(ID3D11Texture2D, usize, usize)>,
+    /// GPU 길을 써도 되나(한 번 실패하면 이 세션은 CPU 길). 캡처가 이 값을 따른다.
+    pub gpu_ok: bool,
+    gpu_failed: bool,
     /// 마지막 화면(줄여 YUV 로 바꾼 것) — 화면이 안 바뀌어도 키프레임·유지 재전송에 쓴다.
     /// 바뀔 때 한 번만 바꿔 둔다 — 다시 보낼 때마다 1080p 를 다시 바꾸면 프레임마다 수십 ms 든다(지연 개선 2026-11-24).
     last: Option<(usize, usize, YUVBuffer)>,
@@ -58,12 +70,50 @@ impl Video {
             hw: None,
             hw_off: false,
             nv12: vec![],
+            #[cfg(windows)]
+            device: None,
+            #[cfg(windows)]
+            tex: None,
+            gpu_ok: true,
+            gpu_failed: false,
             last: None,
             keyframe: true,
         }
     }
 
+    /// 캡처 장치가 바뀌면(캡처를 다시 만듦) 그 장치에 묶인 GPU 인코더를 버린다.
+    #[cfg(windows)]
+    pub fn set_device(&mut self, d: ID3D11Device) {
+        if self.device.as_ref().map(|x| x.as_raw()) != Some(d.as_raw()) {
+            if self.hw.as_ref().is_some_and(|e| e.0.is_gpu()) {
+                self.hw = None;
+            }
+            self.tex = None;
+            self.device = Some(d);
+        }
+    }
+
+    /// GPU 길의 한 장.
+    #[cfg(windows)]
+    pub fn set_texture(&mut self, tex: ID3D11Texture2D, w: usize, h: usize) {
+        self.tex = Some((tex, w, h));
+        self.last = None;
+    }
+
+    /// GPU 길이 방금 실패했으면 마지막 한 장을 돌려준다 — 캡처가 CPU 로 읽어 set_frame 하게.
+    #[cfg(windows)]
+    pub fn fallback_texture(&mut self) -> Option<ID3D11Texture2D> {
+        if !std::mem::take(&mut self.gpu_failed) {
+            return None;
+        }
+        self.tex.take().map(|t| t.0)
+    }
+
     pub fn set_frame(&mut self, bgra: &[u8], w: usize, h: usize) {
+        #[cfg(windows)]
+        {
+            self.tex = None;
+        }
         // 줄일 일이 없으면 복사하지 않고 캡처 버퍼에서 바로 바꾼다.
         let (ow, oh, _) = out_size(w, h);
         let yuv = if (ow, oh) == (w, h) {
@@ -77,6 +127,20 @@ impl Video {
 
     /// 마지막 화면을 인코딩한다(Annex B). 크기가 바뀌면 인코더를 새로 만든다.
     pub fn encode(&mut self) -> Result<Option<Vec<u8>>, openh264::Error> {
+        #[cfg(windows)]
+        if let (Some((tex, w, h)), Some(dev)) = (&self.tex, &self.device) {
+            return match encode_gpu(&mut self.hw, dev, &mut self.keyframe, tex, *w, *h) {
+                Ok(bits) => Ok(bits),
+                Err(e) => {
+                    warn!(event = "video.gpu_failed", why = %e);
+                    self.hw = None;
+                    self.gpu_ok = false;
+                    self.gpu_failed = true;
+                    self.keyframe = true;
+                    Ok(None)
+                }
+            };
+        }
         let Some((w, h, yuv)) = &self.last else {
             return Ok(None);
         };
@@ -137,9 +201,18 @@ fn encode_hw(
     h: usize,
     yuv: &YUVBuffer,
 ) -> windows::core::Result<Option<Vec<u8>>> {
-    if hw.as_ref().is_none_or(|e| (e.1, e.2) != (w, h)) {
+    if hw
+        .as_ref()
+        .is_none_or(|e| e.0.is_gpu() || (e.1, e.2) != (w, h))
+    {
         *hw = None;
-        let e = HwH264::new(w as u32, h as u32, VIDEO_FPS, VIDEO_BITRATE_KBPS * 1000)?;
+        let e = HwH264::new(
+            w as u32,
+            h as u32,
+            VIDEO_FPS,
+            VIDEO_BITRATE_KBPS * 1000,
+            None,
+        )?;
         info!(event = "video.encoder", kind = "hw", name = %e.name, w, h);
         *hw = Some((e, w, h));
         *keyframe = true;
@@ -147,6 +220,39 @@ fn encode_hw(
     i420_to_nv12(yuv.y(), yuv.u(), yuv.v(), nv12);
     let enc = &mut hw.as_mut().expect("위에서 채움").0;
     let bits = enc.encode(nv12, std::mem::take(keyframe))?;
+    Ok((!bits.is_empty()).then_some(bits))
+}
+
+/// GPU 길로 한 장 — 그래픽카드 안의 BGRA(w×h)를 줄여 NV12 로 바꿔 바로 인코딩. 크기가 바뀌면 새로 만든다.
+#[cfg(windows)]
+fn encode_gpu(
+    hw: &mut Option<(HwH264, usize, usize)>,
+    dev: &ID3D11Device,
+    keyframe: &mut bool,
+    tex: &ID3D11Texture2D,
+    w: usize,
+    h: usize,
+) -> windows::core::Result<Option<Vec<u8>>> {
+    if hw
+        .as_ref()
+        .is_none_or(|e| !e.0.is_gpu() || (e.1, e.2) != (w, h))
+    {
+        *hw = None;
+        let (ow, oh, _) = out_size(w, h);
+        let gpu = Some((dev, w as u32, h as u32));
+        let e = HwH264::new(
+            ow as u32,
+            oh as u32,
+            VIDEO_FPS,
+            VIDEO_BITRATE_KBPS * 1000,
+            gpu,
+        )?;
+        info!(event = "video.encoder", kind = "hw_gpu", name = %e.name, w = ow, h = oh);
+        *hw = Some((e, w, h));
+        *keyframe = true;
+    }
+    let enc = &mut hw.as_mut().expect("위에서 채움").0;
+    let bits = enc.encode_texture(tex, std::mem::take(keyframe))?;
     Ok((!bits.is_empty()).then_some(bits))
 }
 

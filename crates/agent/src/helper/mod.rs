@@ -274,7 +274,9 @@ fn run(
             // 못 열면 1초 뒤 다시, 로그는 한 번만(앞 도우미가 복제를 쥐고 있거나 화면이 잠김).
             if cap.is_none() && now >= cap_retry {
                 match Capturer::new() {
-                    Ok(c) => {
+                    Ok(mut c) => {
+                        c.gpu = video.gpu_ok;
+                        video.set_device(c.device());
                         cap = Some(c);
                         cap_warned = false;
                     }
@@ -289,7 +291,10 @@ fn run(
             let mut fresh = false;
             match cap.as_mut().map(Capturer::next) {
                 Some(Ok(Some(f))) => {
-                    video.set_frame(&f.bgra, f.width, f.height);
+                    match f.tex {
+                        Some(t) => video.set_texture(t, f.width, f.height),
+                        None => video.set_frame(&f.bgra, f.width, f.height),
+                    }
                     last_sent = None;
                     fresh = true;
                 }
@@ -325,6 +330,15 @@ fn run(
                             };
                             let _ = ch.write(false, serde_json::to_string(&m)?.as_bytes());
                         }
+                    }
+                }
+            }
+            // GPU 길이 실패했으면 캡처를 CPU 길로 돌리고 마지막 한 장을 CPU 로 읽어 둔다(다음 박자에 CPU 길로 보냄).
+            if let Some(t) = video.fallback_texture() {
+                if let Some(c) = cap.as_mut() {
+                    c.gpu = false;
+                    if let Ok(f) = c.read(&t) {
+                        video.set_frame(&f.bgra, f.width, f.height);
                     }
                 }
             }
