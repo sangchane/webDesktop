@@ -14,6 +14,7 @@ use str0m::channel::ChannelId;
 use str0m::format::Codec;
 use str0m::media::{MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
+use str0m::rtp::Extension;
 use str0m::{Candidate, Event, IceConnectionState, Output, Rtc};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
@@ -124,6 +125,8 @@ fn run(
     let mut rtc = Rtc::builder()
         .clear_codecs()
         .enable_h264(true)
+        // 뷰어 jitter 버퍼를 최소로(playout-delay 0/0) — 뷰어 offer 에 있으면 번호는 str0m 이 맞춘다.
+        .set_extension(12, Extension::PlayoutDelay)
         .build(Instant::now());
     rtc.add_local_candidate(Candidate::host(local, "udp")?);
     match stun_server(ice).and_then(|s| stun::query(&sock, s)) {
@@ -287,12 +290,15 @@ fn run(
                 }
                 _ => {}
             }
-            let due = video.keyframe || last_sent.is_none_or(|t| now - t >= idle);
+            // 입력이 화면을 안 바꿨어도(커서는 영상에 없다) 한 프레임 뒤엔 보낸다 — D-08 짝이 1초 재전송을 기다리지 않게.
+            let input_due = pending.iter().any(|(_, t)| now - *t >= every);
+            let due = video.keyframe || input_due || last_sent.is_none_or(|t| now - t >= idle);
             if let (true, Some(mid), Some(pt)) = (due, mid, pt) {
                 if let Some(bits) = video.encode()? {
                     let ts = MediaTime::from_90khz((now - t0).as_micros() as u64 * 9 / 100);
                     if let Some(w) = rtc.writer(mid) {
-                        w.write(pt, now, ts, bits)?;
+                        let zero = MediaTime::from_hundredths(0);
+                        w.playout_delay(zero, zero).write(pt, now, ts, bits)?;
                     }
                     last_sent = Some(now);
                     // D-08: 주입 뒤 처음 인코딩한 프레임의 RTP 타임스탬프(str0m 은 이 값을 그대로 쓴다).

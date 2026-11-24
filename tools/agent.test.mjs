@@ -11,13 +11,15 @@ import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { ROOT, HUB, OFFLINE, api, open, until, startStack, stopStack } from './stack.mjs';
 
-const EXE = join(ROOT, 'target/debug/webdesktop-agent.exe');
+// AGENT_PROFILE=release 면 배포판으로 잰다(지연은 배포판 기준 — 디버그는 인코딩이 몇 배 느리다).
+const PROFILE = process.env.AGENT_PROFILE === 'release' ? 'release' : 'debug';
+const EXE = join(ROOT, `target/${PROFILE}/webdesktop-agent.exe`);
 const HOME = mkdtempSync(join(tmpdir(), 'webdesktop-agent-'));
 const running = [];
 let browser;
 
 before(async () => {
-  execSync('cargo build -q -p agent', { cwd: ROOT, stdio: 'inherit', env: { ...process.env, PATH: `${join(homedir(), '.cargo', 'bin')};${process.env.PATH}` } });
+  execSync(`cargo build -q -p agent${PROFILE === 'release' ? ' --release' : ''}`, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, PATH: `${join(homedir(), '.cargo', 'bin')};${process.env.PATH}` } });
   await startStack();
 });
 after(async () => {
@@ -119,6 +121,8 @@ test('실제 화면: 뷰어 offer → 에이전트 answer → H.264 프레임, �
   v.ws.send(JSON.stringify({ t: 'signal.offer', session_id: s.session_id, sdp: offer }));
   const answer = await until(v, (m) => m.t === 'signal.answer', 20_000);
   await page.evaluate((sdp) => window.pc.setRemoteDescription({ type: 'answer', sdp }), answer.sdp);
+  // 뷰어 jitter 버퍼를 최소로 — 에이전트가 playout-delay 확장을 받아 준다(지연 개선 2026-11-24).
+  assert.match(answer.sdp, /playout-delay/, 'answer 에 playout-delay 확장');
 
   const agentLog = () => readdirSync(join(HOME, 'logs')).map((f) => readFileSync(join(HOME, 'logs', f), 'utf8')).join('');
   const video = await waitFor(
@@ -144,14 +148,33 @@ test('실제 화면: 뷰어 offer → 에이전트 answer → H.264 프레임, �
   assert.ok(video.w >= 640 && video.w <= 2560 && video.h >= 360, JSON.stringify(video)); // VIDEO_MAX_EDGE
 
   await page.evaluate(() => window.input.readyState === 'open' || new Promise((r) => (window.input.onopen = r)));
-  await page.evaluate(() => window.input.send(JSON.stringify({ t: 'key', seq: 7, hid_usage: 0x90, down: true })));
-  // 화면이 안 바뀌어도 VIDEO_IDLE_RESEND_MS(1초) 안에 다음 프레임이 나간다.
-  const applied = await waitFor('input.applied', () => page.evaluate(() => window.applied.find((a) => a.seq === 7)), 5_000);
+  // 화면이 안 바뀌는 입력도 한두 프레임 안에 반영 프레임이 나간다(1초 재전송을 기다리지 않음). 다섯 번 재서 가장 느린 값.
+  let slowest = 0;
+  let applied;
+  for (let seq = 7; seq < 12; seq++) {
+    const r = await page.evaluate(async (seq) => {
+      await new Promise((ok) => setTimeout(ok, 300));
+      const t0 = performance.now();
+      window.input.send(JSON.stringify({ t: 'key', seq, hid_usage: 0x90, down: true }));
+      for (;;) {
+        const a = window.applied.find((a) => a.seq === seq);
+        if (a) return { a, ms: performance.now() - t0 };
+        if (performance.now() - t0 > 5000) return null;
+        await new Promise((ok) => setTimeout(ok, 5));
+      }
+    }, seq);
+    assert.ok(r, `input.applied seq ${seq} 안 옴`);
+    applied = r.a;
+    slowest = Math.max(slowest, Math.round(r.ms));
+    console.log(`input.applied seq ${seq}: ${Math.round(r.ms)}ms`);
+  }
   assert.equal(applied.t, 'input.applied');
   assert.ok(Number.isInteger(applied.rtp_ts));
+  // 1초 재전송을 기다리던 잘못(최대 1000ms)이 돌아오지 않게. 보통 70~130ms, 가끔 230ms 안팎(30장/초·CPU 인코딩 — 2026-11-24).
+  if (PROFILE === "release") assert.ok(slowest < 400, `input.applied 가장 느림 ${slowest}ms`);
 
   v.ws.send(JSON.stringify({ t: 'session.end', session_id: s.session_id, reason: 'viewer_closed' }));
-  console.log(`실제 화면 ${video.w}x${video.h} ${video.codec}, input.applied rtp_ts=${applied.rtp_ts}`);
+  console.log(`실제 화면 ${video.w}x${video.h} ${video.codec}, input.applied 가장 느림 ${slowest}ms`);
 });
 
 test('같은 기기로 두 번째 에이전트가 붙으면 앞 에이전트가 끝남', async () => {

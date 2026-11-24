@@ -1,5 +1,5 @@
 //! 캡처 한 장 → 줄이기 → H.264(openh264). 줄이기·크기 계산은 순수 함수로 떼어 시험한다.
-use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate, Level, UsageType};
+use openh264::encoder::{BitRate, Complexity, Encoder, EncoderConfig, FrameRate, Level, UsageType};
 use openh264::formats::{BgraSliceU8, YUVBuffer};
 use openh264::OpenH264API;
 
@@ -8,6 +8,7 @@ pub const VIDEO_MAX_EDGE: usize = 2560;
 pub const VIDEO_FPS: u32 = 30;
 pub const VIDEO_BITRATE_KBPS: u32 = 4000;
 pub const VIDEO_IDLE_RESEND_MS: u64 = 1000;
+pub const VIDEO_ENC_THREADS: u16 = 4;
 
 /// 보낼 크기 — 긴 변이 VIDEO_MAX_EDGE 이하가 되게 정수배로 줄이고, H.264 4:2:0 이라 짝수로 자른다.
 pub fn out_size(w: usize, h: usize) -> (usize, usize, usize) {
@@ -34,8 +35,9 @@ pub fn shrink(bgra: &[u8], w: usize, h: usize) -> (usize, usize, Vec<u8>) {
 
 pub struct Video {
     enc: Option<(Encoder, usize, usize)>,
-    /// 마지막 화면(줄인 뒤) — 화면이 안 바뀌어도 키프레임·유지 재전송에 쓴다.
-    pub last: Option<(usize, usize, Vec<u8>)>,
+    /// 마지막 화면(줄여 YUV 로 바꾼 것) — 화면이 안 바뀌어도 키프레임·유지 재전송에 쓴다.
+    /// 바뀔 때 한 번만 바꿔 둔다 — 다시 보낼 때마다 1080p 를 다시 바꾸면 프레임마다 수십 ms 든다(지연 개선 2026-11-24).
+    last: Option<(usize, usize, YUVBuffer)>,
     pub keyframe: bool,
 }
 
@@ -49,12 +51,20 @@ impl Video {
     }
 
     pub fn set_frame(&mut self, bgra: &[u8], w: usize, h: usize) {
-        self.last = Some(shrink(bgra, w, h));
+        // 줄일 일이 없으면 복사하지 않고 캡처 버퍼에서 바로 바꾼다.
+        let (ow, oh, _) = out_size(w, h);
+        let yuv = if (ow, oh) == (w, h) {
+            YUVBuffer::from_bgra8_source(BgraSliceU8::new(bgra, (w, h)))
+        } else {
+            let (w, h, small) = shrink(bgra, w, h);
+            YUVBuffer::from_bgra8_source(BgraSliceU8::new(&small, (w, h)))
+        };
+        self.last = Some((ow, oh, yuv));
     }
 
     /// 마지막 화면을 인코딩한다(Annex B). 크기가 바뀌면 인코더를 새로 만든다.
     pub fn encode(&mut self) -> Result<Option<Vec<u8>>, openh264::Error> {
-        let Some((w, h, bgra)) = &self.last else {
+        let Some((w, h, yuv)) = &self.last else {
             return Ok(None);
         };
         if self.enc.as_ref().is_none_or(|e| (e.1, e.2) != (*w, *h)) {
@@ -62,6 +72,11 @@ impl Video {
                 .bitrate(BitRate::from_bps(VIDEO_BITRATE_KBPS * 1000))
                 .max_frame_rate(FrameRate::from_hz(VIDEO_FPS as f32))
                 .usage_type(UsageType::ScreenContentRealTime)
+                // 가장 빠른 쪽 + 여러 실로 나눠 한 장 인코딩 시간을 줄인다(지연이 화질보다 먼저).
+                .complexity(Complexity::Low)
+                .num_threads(VIDEO_ENC_THREADS)
+                // 비트레이트가 넘쳐도 장을 버리지 않는다 — 버린 장은 다음 장까지(최대 1초) 화면이 늦는다.
+                .skip_frames(false)
                 .level(Level::Level_5_1); // 03 H264_MAX_LEVEL
             self.enc = Some((
                 Encoder::with_api_config(OpenH264API::from_source(), cfg)?,
@@ -74,8 +89,7 @@ impl Video {
         if std::mem::take(&mut self.keyframe) {
             enc.force_intra_frame();
         }
-        let yuv = YUVBuffer::from_bgra8_source(BgraSliceU8::new(bgra, (*w, *h)));
-        let bits = enc.encode(&yuv)?.to_vec();
+        let bits = enc.encode(yuv)?.to_vec();
         Ok((!bits.is_empty()).then_some(bits))
     }
 }
