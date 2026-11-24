@@ -6,9 +6,10 @@ use crate::store::{DeviceRow, NewDevice, SessionRow, Stats, Store};
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine;
 use proto::{
-    parse, Device, EndReason, EnrollCode, EnrollReq, EnrollResp, ErrorType, IceServer,
-    InstallLinks, Os, Perm, SessionReq, SessionResp, Validate, WsMsg, WsTicket, WsTicketReq,
-    PROTO_MAJOR, REG_CODE_LEN, VIEWER_UA_MAX, WS_MSG_MAX_BYTES,
+    parse, AccessLog, AccessLogItem, Device, EndReason, EnrollCode, EnrollReq, EnrollResp,
+    ErrorType, IceServer, InstallLinks, Os, Perm, SessionReq, SessionResp, Validate, WsMsg,
+    WsTicket, WsTicketReq, ACCESS_LOG_DAYS, ACCESS_LOG_PAGE, PROTO_MAJOR, REG_CODE_LEN,
+    VIEWER_UA_MAX, WS_MSG_MAX_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -298,6 +299,7 @@ impl Hub {
         match (req.method(), path.as_str()) {
             (Method::Post, "/api/enroll-codes") => self.new_code(&cfg, now_ms).map_err(internal),
             (Method::Get, "/api/devices") => self.devices(now_ms).map_err(internal),
+            (Method::Get, "/api/access-log") => self.access_log(&req, now_ms),
             (Method::Post, "/api/ws-ticket") => self.ticket(req, &cfg, now_ms).await,
             (Method::Post, "/api/sessions") => self.open_session(req, &cfg, now_ms).await,
             (Method::Get, "/ws/viewer") => self.viewer_ws(&req, now_ms),
@@ -306,12 +308,45 @@ impl Hub {
                 let token = query(&req, "t");
                 let row = self.store.code_get().map_err(internal)?;
                 service::judge_install(row.as_ref(), &token, now_ms)?;
-                // shortcut: 설치 파일(R2 webdesktop-releases)은 에이전트 빌드(T8) 뒤에 붙인다 — 그때까지 토큰만 확인.
-                Err(ErrorType::NotFound)
+                self.install_file(&path).await
             }
             (Method::Get, "/agent/ws") => self.agent_ws(&req, now_ms).map_err(internal),
             _ => Err(ErrorType::NotFound),
         }
+    }
+
+    /// E-12 — R2 `webdesktop-releases` 의 `<os>/<파일>`. 아직 올리지 않은 OS(macOS — 첫 작업 3)는 not_found.
+    async fn install_file(&self, path: &str) -> std::result::Result<Response, ErrorType> {
+        let (key, name) = match path {
+            "/agent/install/windows" => ("windows/webdesktop-agent.exe", "webdesktop-agent.exe"),
+            _ => ("macos/webdesktop-agent", "webdesktop-agent"),
+        };
+        let bucket = self.env.bucket("RELEASES").map_err(internal)?;
+        let obj = bucket
+            .get(key)
+            .execute()
+            .await
+            .map_err(internal)?
+            .ok_or(ErrorType::NotFound)?;
+        let size = obj.size().to_string();
+        let body = obj
+            .body()
+            .ok_or(ErrorType::NotFound)?
+            .response_body()
+            .map_err(internal)?;
+        let mut res = Response::from_body(body).map_err(internal)?;
+        let h = res.headers_mut();
+        let set = |h: &mut Headers, k: &str, v: &str| h.set(k, v).map_err(internal);
+        set(h, "content-type", "application/octet-stream")?;
+        set(
+            h,
+            "content-disposition",
+            &format!("attachment; filename=\"{name}\""),
+        )?;
+        set(h, "cache-control", "no-store")?;
+        set(h, "content-length", &size)?;
+        log("info", "install.served", json!({ "key": key }));
+        Ok(res)
     }
 
     /// E-03 — 이전 활성 코드·링크를 버리고 새로 만든다.
@@ -333,6 +368,57 @@ impl Hub {
             },
             201,
         )
+    }
+
+    /// E-09 — 커서 `<started_at>_<id>`, 보관 기간(ACCESS_LOG_DAYS) 안만.
+    fn access_log(&self, req: &Request, now_ms: i64) -> std::result::Result<Response, ErrorType> {
+        let before = query(req, "before");
+        let cursor = if before.is_empty() {
+            // JS 안전 정수 최댓값 — 숫자가 JS 로 넘어가며 정밀도 경고를 남기지 않게.
+            ((1_i64 << 53) - 1, String::new())
+        } else {
+            let (at, id) = before.split_once('_').ok_or(ErrorType::BadRequest)?;
+            (
+                at.parse().map_err(|_| ErrorType::BadRequest)?,
+                id.to_owned(),
+            )
+        };
+        let since = now_ms - ACCESS_LOG_DAYS as i64 * 86_400_000;
+        // 한 줄 더 읽어 다음 쪽이 실제로 있을 때만 next 를 준다.
+        let mut rows = self
+            .store
+            .access_log(since, (cursor.0, &cursor.1), ACCESS_LOG_PAGE + 1)
+            .map_err(internal)?;
+        let more = rows.len() > ACCESS_LOG_PAGE;
+        rows.truncate(ACCESS_LOG_PAGE);
+        let next = more
+            .then(|| rows.last().map(|r| format!("{}_{}", r.started_at, r.id)))
+            .flatten();
+        let items = rows
+            .into_iter()
+            .map(|r| AccessLogItem {
+                reconnect_ms: r
+                    .reconnect_ms_json
+                    .and_then(|j| serde_json::from_str(&j).ok())
+                    .unwrap_or_default(),
+                session_id: r.id,
+                device_id: r.device_id,
+                viewer_id: r.viewer_id,
+                viewer_ua: r.viewer_ua,
+                path: r.path,
+                click_to_first_frame_ms: r.click_to_first_frame_ms,
+                latency_p50_ms: r.latency_p50_ms,
+                reconnect_count: r.reconnect_count,
+                reconnect_ms_max: r.reconnect_ms_max,
+                restarts: r.restarts,
+                new_session_used: r.new_session_used != 0,
+                encoder: r.encoder,
+                started_at: iso(r.started_at),
+                ended_at: r.ended_at.map(iso),
+                end_reason: r.end_reason,
+            })
+            .collect();
+        Response::from_json(&AccessLog { items, next }).map_err(internal)
     }
 
     /// E-02.

@@ -215,6 +215,38 @@ pub struct InstallLinks {
     pub macos: String,
 }
 
+/// E-09 한 번에 돌려주는 줄 수, 보관 기간.
+pub const ACCESS_LOG_PAGE: usize = 50;
+pub const ACCESS_LOG_DAYS: u64 = 90;
+
+/// E-09 접속 기록 한 줄 (세션 하나).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccessLogItem {
+    pub session_id: String,
+    pub device_id: String,
+    pub viewer_id: String,
+    pub viewer_ua: Option<String>,
+    pub path: Option<NetPath>,
+    pub click_to_first_frame_ms: Option<u32>,
+    pub latency_p50_ms: Option<u32>,
+    pub reconnect_count: u32,
+    pub reconnect_ms_max: Option<u32>,
+    pub reconnect_ms: Vec<u32>,
+    pub restarts: u32,
+    pub new_session_used: bool,
+    pub encoder: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub end_reason: Option<EndReason>,
+}
+
+/// E-09 응답 — `next` 를 다음 `?before=` 로.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccessLog {
+    pub items: Vec<AccessLogItem>,
+    pub next: Option<String>,
+}
+
 /// E-03 응답.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnrollCode {

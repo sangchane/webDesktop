@@ -132,6 +132,7 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | REG_CODE_MAX_TRIES | 5 | 회 | 설계 결정 DL-7 |
 | ACCESS_SESSION_DAYS | 7 | 일 | 실측: Worker Access 설정 화면의 최대 선택값 7 days(2026-11-23) — DL-11 |
 | ACCESS_LOG_DAYS | 90 | 일 | 설계 결정 DL-7 |
+| ACCESS_LOG_PAGE | 50 | 줄(E-09 한 번에 돌려주는 접속 기록 수) | 설계 결정 DL-21 |
 | VIDEO_MAX_EDGE | 2560 | px | 설계 결정 DL-7 (B13) |
 | H264_MAX_LEVEL | 5.1 | H.264 레벨 | 설계 결정 DL-7 (B13) |
 | SAVER_BITRATE_KBPS | 1000 | kbps | 설계 결정 DL-7 (R9) |

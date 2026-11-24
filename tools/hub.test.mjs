@@ -4,7 +4,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import {
-  HUB, CODE_TTL, OFFLINE, TICKET_TTL, turn, jwt, api, hub, agentKey, enrollBody,
+  HUB, CODE_TTL, OFFLINE, INSTALL_BYTES, TICKET_TTL, turn, jwt, api, hub, agentKey, enrollBody,
   open, quiet, until, connectAgent, startStack, stopStack,
 } from './stack.mjs';
 
@@ -36,8 +36,14 @@ test('등록 코드: 꼴·설치 링크·설치 링크 만료', async () => {
   assert.match(body.code, /^[2-9A-HJ-NP-Z]{8}$/);
   const link = new URL(body.install_links.windows);
   assert.equal(link.origin, HUB);
-  // 토큰이 맞으면 토큰 오류가 아니다(설치 파일은 T8 뒤라 지금은 not_found).
-  assert.equal((await hub(link.pathname + link.search, { now: t0 })).body.type, 'not_found');
+  // 토큰이 맞으면 R2 의 설치 파일, 아직 올리지 않은 OS(macOS)는 not_found.
+  const file = await fetch(link, { headers: { 'x-test-now': String(t0) } });
+  assert.equal(file.status, 200);
+  assert.equal(file.headers.get('content-length'), String(INSTALL_BYTES.length));
+  assert.match(file.headers.get('content-disposition'), /filename="webdesktop-agent\.exe"/);
+  assert.deepEqual(Buffer.from(await file.arrayBuffer()), INSTALL_BYTES);
+  const mac = new URL(body.install_links.macos);
+  assert.equal((await hub(mac.pathname + mac.search, { now: t0 })).body.type, 'not_found');
   assert.equal((await hub(link.pathname + '?t=wrong', { now: t0 })).body.type, 'code_invalid');
   assert.equal((await hub(link.pathname + link.search, { now: t0 + CODE_TTL + 1 })).body.type, 'code_expired');
 });
@@ -294,6 +300,23 @@ test('계측·종료: 뷰어 session.end 는 에이전트로, 허브만 쓰는 �
   assert.equal((await until(S.b, (m) => m.t === 'error')).type, 'bad_request');
   send(S.b, { t: 'signal.offer', session_id: S.sid2, sdp: 'v=0' });
   assert.equal((await until(S.b, (m) => m.t === 'error')).type, 'not_found');
+  // E-09: 저장된 계측이 접속 기록에 그대로 나온다.
+  const log = await api('/api/access-log');
+  assert.equal(log.status, 200);
+  const row = log.body.items.find((i) => i.session_id === S.sid2);
+  assert.equal(row.path, 'relay');
+  assert.equal(row.click_to_first_frame_ms, 1200);
+  assert.deepEqual(row.reconnect_ms, [300]);
+  assert.equal(row.end_reason, 'viewer_closed');
+  // 새것부터, 커서 다음 쪽은 그 줄보다 앞선 것만.
+  const keys = log.body.items.map((i) => `${Date.parse(i.started_at)}_${i.session_id}`);
+  assert.ok(keys.length >= 2);
+  assert.deepEqual(keys, [...keys].sort((a, b) => (Number(a.split('_')[0]) - Number(b.split('_')[0])) || (a < b ? -1 : 1)).reverse());
+  assert.equal(log.body.next, null);
+  const after = await api(`/api/access-log?before=${keys[0]}`);
+  assert.deepEqual(after.body.items.map((i) => i.session_id), log.body.items.slice(1).map((i) => i.session_id));
+  assert.equal((await api('/api/access-log?before=x')).body.type, 'bad_request');
+  assert.equal((await api('/api/access-log', { token: null })).status, 401);
 });
 
 test('에이전트 session.end·TURN 실패·에이전트 끊김', async () => {

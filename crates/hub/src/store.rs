@@ -42,6 +42,27 @@ pub struct SessionRow {
     pub ended_at: Option<i64>,
 }
 
+/// E-09 한 줄 — 칸 이름·값은 session 표 그대로.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LogRow {
+    pub id: String,
+    pub device_id: String,
+    pub viewer_id: String,
+    pub viewer_ua: Option<String>,
+    pub path: Option<proto::NetPath>,
+    pub click_to_first_frame_ms: Option<u32>,
+    pub latency_p50_ms: Option<u32>,
+    pub reconnect_count: u32,
+    pub reconnect_ms_max: Option<u32>,
+    pub reconnect_ms_json: Option<String>,
+    pub restarts: u32,
+    pub new_session_used: i64,
+    pub encoder: Option<String>,
+    pub end_reason: Option<proto::EndReason>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+}
+
 /// M-10 저장 값 (reconnect_ms 는 JSON 글로).
 pub struct Stats<'a> {
     pub path: Option<&'a str>,
@@ -234,6 +255,26 @@ impl Store {
             vec![now.into(), reason.into(), id.into()],
         )?;
         Ok(())
+    }
+
+    /// E-09 — `idx_session_started`, 새것부터. 커서는 (started_at, id) 보다 앞선 줄.
+    pub fn access_log(
+        &self,
+        since: i64,
+        before: (i64, &str),
+        limit: usize,
+    ) -> worker::Result<Vec<LogRow>> {
+        self.0
+            .exec(
+                "SELECT id, device_id, viewer_id, viewer_ua, path, click_to_first_frame_ms, latency_p50_ms,              reconnect_count, reconnect_ms_max, reconnect_ms_json, restarts, new_session_used, encoder,              end_reason, started_at, ended_at FROM session              WHERE started_at >= ? AND (started_at, id) < (?, ?) ORDER BY started_at DESC, id DESC LIMIT ?",
+                vec![
+                    since.into(),
+                    before.0.into(),
+                    before.1.into(),
+                    (limit as i64).into(),
+                ],
+            )?
+            .to_array()
     }
 
     /// M-10 — 마지막으로 받은 값으로 덮는다.

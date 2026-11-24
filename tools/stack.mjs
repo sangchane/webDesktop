@@ -18,6 +18,7 @@ const AUD = toml.match(/ACCESS_AUD = "(.+)"/)[1];
 export const CODE_TTL = 10 * 60_000; // REG_CODE_TTL_MIN
 export const OFFLINE = 90_000; // OFFLINE_DETECT_SEC
 export const TICKET_TTL = 60_000; // WS_TICKET_TTL_SEC
+export const INSTALL_BYTES = Buffer.from('MZ fake agent');
 
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const procs = [];
@@ -174,6 +175,12 @@ export async function startStack() {
       `TURN_KEY_ID=test-key\nTURN_KEY_TOKEN=test-token\nTURN_TEST_URL=http://127.0.0.1:${turnServer.address().port}\n`,
   );
   persist = mkdtempSync(join(tmpdir(), 'webdesktop-hub-'));
+  // E-12 설치 파일 자리 — 로컬 R2 에 작은 가짜 실행 파일(macOS 는 비워 not_found 를 본다).
+  writeFileSync(join(persist, 'agent.exe'), INSTALL_BYTES);
+  execSync(`npx wrangler r2 object put webdesktop-releases/windows/webdesktop-agent.exe --local --persist-to "${persist}" --file "${join(persist, 'agent.exe')}"`, {
+    cwd: join(ROOT, 'crates/hub'),
+    stdio: 'ignore',
+  });
   startWrangler('crates/hub', 8787, persist);
   await waitUp(HUB + '/healthz', 600_000);
   startWrangler('crates/app', 8788, persist);

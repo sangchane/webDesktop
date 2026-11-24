@@ -16,6 +16,11 @@ class_name = "Hub"
 tag = "v1"
 new_sqlite_classes = ["Hub"]
 
+# 설치 파일(E-12) — 키 `windows/webdesktop-agent.exe`. 로그인 없는 설치 링크가 토큰 확인 뒤 내려준다.
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "webdesktop-releases"
+
 [observability]
 enabled = true
 
