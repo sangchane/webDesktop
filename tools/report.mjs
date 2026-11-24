@@ -67,7 +67,7 @@ function grade(items, clip) {
       `첫 화면 ${CONNECT_MAX_SEC}초 이하 ${fast}/${ff.length}회 (10회 중 9회 필요) — [${ff.map((x) => v(x)).join(', ')}]ms`],
     ['SC-003', p50 != null && p50 <= LATENCY_P50_MS,
       `입력 지연 p50 ${v(p50, "ms")} (기준 ${LATENCY_P50_MS}ms 이하) — 세션별 [${lat.join(', ')}]ms`],
-    ['SC-006', clip === SC006_TEXT, `호스트 클립보드 「${clip}」 (기준 「${SC006_TEXT}」)`],
+    ['SC-006', clip === SC006_TEXT, `PC 메모장 글 「${clip}」 (기준 「${SC006_TEXT}」)`],
   ];
 }
 {
@@ -114,8 +114,14 @@ if (at >= 0) {
   }
   // shortcut: 첫 쪽(ACCESS_LOG_PAGE=50)만 본다 — 시험 10회에는 충분, 하루치를 볼 때 next 를 따라가게.
   const items = accessLog().items.filter((x) => new Date(x.started_at) >= since && /iPhone/.test(x.viewer_ua ?? ''));
-  const clip = execFileSync('powershell', ['-NoProfile', '-Command',
-    '[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw'], { encoding: 'utf8' }).trim();
+  // SC-006 — 이 PC 메모장 창(지금 보이는 탭)의 글을 UI Automation 으로 읽는다. 창이 여럿이면 줄바꿈으로 잇는다.
+  const clip = execFileSync('powershell', ['-NoProfile', '-Command', `[Console]::OutputEncoding=[Text.Encoding]::UTF8
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$A = [Windows.Automation.AutomationElement]
+$wins = $A::RootElement.FindAll('Children', (New-Object Windows.Automation.PropertyCondition($A::ClassNameProperty, 'Notepad')))
+$doc = New-Object Windows.Automation.PropertyCondition($A::ControlTypeProperty, [Windows.Automation.ControlType]::Document)
+($wins | % { $_.FindFirst('Descendants', $doc) } | ? { $_ } | % { $_.GetCurrentPattern([Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText(-1) }) -join "\`n"`],
+    { encoding: 'utf8' }).trim();
   console.log(`${since.toISOString()} 뒤 iPhone 세션 ${items.length}개`);
   for (const x of items) console.log(`- ${x.started_at} · 첫 화면 ${v(x.click_to_first_frame_ms, 'ms')} · p50 ${v(x.latency_p50_ms, 'ms')} · path=${v(x.path)}`);
   const g = grade(items, clip);
