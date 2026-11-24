@@ -1,0 +1,35 @@
+[package]
+name = "agent"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "webdesktop-agent"
+path = "src/main.rs"
+
+[dependencies]
+proto = { path = "../proto" }
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+ed25519-dalek = "3"
+getrandom = "0.4"
+# TLS 는 OS 것(Windows SChannel) — ring·aws-lc 빌드를 피한다.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+tokio = { version = "1", features = ["rt", "time", "macros", "net"] }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-appender = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+] }

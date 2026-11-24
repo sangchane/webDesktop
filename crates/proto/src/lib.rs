@@ -124,7 +124,8 @@ fn text_ok(s: &str, max: usize) -> bool {
     !s.is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control)
 }
 
-fn id_ok(s: &str) -> bool {
+/// 식별자 꼴(uuid 글자) — 허브 입구와 에이전트 설정 검사가 같이 쓴다.
+pub fn id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= ID_MAX && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 

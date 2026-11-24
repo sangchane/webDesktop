@@ -4,9 +4,9 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 $steps = @(
   @{ name = 'fmt';          cmd = { cargo fmt --all -- --check } },
-  @{ name = 'clippy-native';cmd = { cargo clippy -q -p proto -p hub -p web --all-targets -- -D warnings } },
+  @{ name = 'clippy-native';cmd = { cargo clippy -q -p proto -p hub -p web -p agent --all-targets -- -D warnings } },
   @{ name = 'clippy-hub';   cmd = { cargo clippy -q -p hub -p app -p web --target wasm32-unknown-unknown -- -D warnings } },
-  @{ name = 'test';         cmd = { cargo test -q -p proto -p hub -p web } },
+  @{ name = 'test';         cmd = { cargo test -q -p proto -p hub -p web -p agent } },
   @{ name = 'deny';         cmd = { cargo deny --log-level error check licenses bans } }
 )
 foreach ($s in $steps) {

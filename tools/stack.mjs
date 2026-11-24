@@ -21,6 +21,7 @@ export const TICKET_TTL = 60_000; // WS_TICKET_TTL_SEC
 
 const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const procs = [];
+let persist = null; // wrangler 로컬 DB 폴더 — 시험이 끝나면 지운다.
 
 export function jwt(over = {}, key = rsa.privateKey) {
   const b = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
@@ -172,7 +173,7 @@ export async function startStack() {
     `ACCESS_TEST_JWKS='${JSON.stringify({ keys: [jwk] })}'\nHUB_PUBLIC_URL=${HUB}\n` +
       `TURN_KEY_ID=test-key\nTURN_KEY_TOKEN=test-token\nTURN_TEST_URL=http://127.0.0.1:${turnServer.address().port}\n`,
   );
-  const persist = mkdtempSync(join(tmpdir(), 'webdesktop-hub-'));
+  persist = mkdtempSync(join(tmpdir(), 'webdesktop-hub-'));
   startWrangler('crates/hub', 8787, persist);
   await waitUp(HUB + '/healthz', 600_000);
   startWrangler('crates/app', 8788, persist);
@@ -187,5 +188,11 @@ export function stopStack() {
     try {
       execSync(`taskkill /pid ${p.pid} /T /F`, { stdio: 'ignore' });
     } catch {}
+  }
+  // workerd 가 막 꺼져 파일을 잡고 있을 수 있다 — 몇 번 다시 시도.
+  try {
+    if (persist) rmSync(persist, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  } catch (e) {
+    console.warn(`시험 DB 폴더를 지우지 못함(시험 결과와 무관): ${persist} — ${e.code}`);
   }
 }
