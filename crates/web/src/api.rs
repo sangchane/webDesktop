@@ -32,6 +32,19 @@ pub fn relay_only() -> bool {
         .is_ok_and(|q| q.split(['?', '&']).any(|p| p == "relay=1"))
 }
 
+/// `?bench=N` — 켜진 기기를 N번 저절로 열고 닫는 시험(SC-002 10회). 마지막 번은 열어 둔다.
+pub fn bench() -> u32 {
+    window()
+        .location()
+        .search()
+        .ok()
+        .and_then(|q| {
+            q.split(['?', '&'])
+                .find_map(|p| p.strip_prefix("bench=")?.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
 pub fn now_ms() -> f64 {
     window().performance().map_or(0.0, |p| p.now())
 }

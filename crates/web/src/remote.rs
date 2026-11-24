@@ -474,6 +474,25 @@ pub fn Remote(device: Device, t0: f64) -> impl IntoView {
         })
         .collect_view();
 
+    // ?bench=N — 남은 횟수가 있으면 첫 화면(또는 실패) 3초 뒤 닫고 목록으로. 마지막 번은 열어 둔다.
+    // 같은 열기(t0)일 때만 닫는다 — 끊김 뒤 다시 Live 가 와도 다음 열기를 닫지 않게.
+    // shortcut: 「여는 중」에서 안 끝나면(잠긴 화면) 시험이 멈춘다 — SC-004 안내가 생기면 Ended 로 잡힌다.
+    Effect::new(move |_| {
+        let done = matches!(ui.phase.get(), Phase::Live | Phase::Ended(_));
+        if done && crate::BENCH.with(|b| b.get()) > 0 {
+            set_timeout(
+                move || {
+                    if matches!(st.screen.get_untracked(), Screen::Remote { t0: x, .. } if x == t0)
+                    {
+                        session::close();
+                        st.screen.set(Screen::List);
+                    }
+                },
+                std::time::Duration::from_secs(3),
+            );
+        }
+    });
+
     let name = device.name.clone();
     let back = move |_| {
         session::close();

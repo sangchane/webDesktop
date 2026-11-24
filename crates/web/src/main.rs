@@ -21,6 +21,8 @@ use std::rc::Rc;
 thread_local! {
     /// 목록 받기가 도는 중인가, 도는 중에 또 받아야 할 일이 생겼나.
     static REFRESH: Cell<(bool, bool)> = const { Cell::new((false, false)) };
+    /// `?bench=N` 의 남은 열기 횟수.
+    pub static BENCH: Cell<u32> = Cell::new(api::bench());
 }
 
 #[derive(Clone, PartialEq)]
@@ -130,6 +132,26 @@ fn App() -> impl IntoView {
         Rc::new(move |m| on_msg(st, m)),
         Rc::new(move |s| st.hub.set(Some(s))),
     );
+    // ?bench=N — 목록에 오면 열 수 있는 첫 기기를 저절로 연다. 닫고 돌아오는 것은 remote.rs.
+    Effect::new(move |_| {
+        if st.screen.get() != Screen::List || st.load.get() != Load::Ready {
+            return;
+        }
+        let Some(device) = st
+            .devices
+            .with(|v| v.iter().find(|d| d.connectable).cloned())
+        else {
+            return;
+        };
+        if BENCH.with(|b| b.get()) == 0 {
+            return;
+        }
+        BENCH.with(|b| b.set(b.get() - 1));
+        st.screen.set(Screen::Remote {
+            device,
+            t0: api::now_ms(),
+        });
+    });
     move || match st.screen.get() {
         Screen::List => view! { <list::List/> }.into_any(),
         Screen::Add => view! { <list::Add/> }.into_any(),

@@ -340,6 +340,19 @@ test('끊기 → 에이전트에 viewer_closed, 목록으로', async () => {
   );
 });
 
+test('?bench=3 — 저절로 3번 열고, 앞 2번은 닫고, 마지막은 열어 둔다 (SC-002 시험)', async () => {
+  const n0 = toAgent.filter((m) => m.t === 'session.start').length;
+  const page = await viewerPage();
+  await page.goto(APP + '/?bench=3');
+  await eventually(() => sessionOf(n0 + 2), '세 번째 열기', 60000);
+  await page.locator('.status').waitFor({ state: 'detached', timeout: 20000 });
+  await sleep(4000); // 남은 횟수가 0 이면 3초 뒤에도 닫지 않아야 한다
+  const ended = (i) => toAgent.some((m) => m.t === 'session.end' && m.session_id === sessionOf(i) && m.reason === 'viewer_closed');
+  assert.deepEqual([ended(n0), ended(n0 + 1), ended(n0 + 2)], [true, true, false]);
+  assert.equal(sessionOf(n0 + 3), undefined, '네 번째 열기는 없어야');
+  await page.context().close();
+});
+
 test('ui-check: 빈 목록·목록·기기 추가·가상 키보드 (1440·390)', { skip: !existsSync(UI_CHECK) && 'ui-check 없음' }, () => {
   for (const name of ['list-empty', 'list', 'add', 'remote-vkbd']) {
     try {
