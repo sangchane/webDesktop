@@ -140,6 +140,7 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | VIDEO_BITRATE_KBPS | 4000 | kbps(기본 화질 목표 — 대역폭 맞추기는 FR-005 대역폭 때) | 설계 결정 DL-20 |
 | VIDEO_IDLE_RESEND_MS | 1000 | ms(화면이 안 바뀌어도 마지막 화면을 다시 보내는 간격) | 설계 결정 DL-20 |
 | VIDEO_ENC_THREADS | 4 | 실(openh264 인코딩을 나눠 돌리는 수 — 한 장 시간을 줄임) | 설계 결정 DL-23 (지연 개선 2026-11-24) |
+| INPUT_SETTLE_MS | 20 | ms(입력 뒤 화면이 그려질 때까지 기다렸다 바로 찍는 시간 — 60Hz 한 장 16.7ms + 여유. 이 뒤 새로 찍힌 장을 반영 장으로 봄) | 설계 결정 DL-23 (지연 2차 2026-11-24) |
 | SESSION_DEAD_SEC | 30 | 초(에이전트 세션이 처음 연결까지, 또는 끊긴 채로 기다리는 상한 — 넘으면 끝내고 캡처를 놓음) | 설계 결정 DL-20 |
 | AGENT_HEARTBEAT_SEC | 30 | 초 | 설계 결정 DL-7 (Jump 59초 관찰 — local-inspection J3) |
 | AGENT_RECONNECT_MAX_SEC | 60 | 초(에이전트 재접속 대기 상한, 1초부터 두 배씩) | 설계 결정 DL-19 |

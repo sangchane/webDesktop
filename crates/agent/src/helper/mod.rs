@@ -18,7 +18,7 @@ use str0m::rtp::Extension;
 use str0m::{Candidate, Event, IceConnectionState, Output, Rtc};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
-use video::{Video, VIDEO_FPS, VIDEO_IDLE_RESEND_MS};
+use video::{Video, INPUT_SETTLE_MS, VIDEO_FPS, VIDEO_IDLE_RESEND_MS};
 
 /// 상주 → 도우미.
 pub enum Cmd {
@@ -156,6 +156,7 @@ fn run(
     let mut down_since = Some(t0);
     let every = Duration::from_millis(1000 / VIDEO_FPS as u64);
     let idle = Duration::from_millis(VIDEO_IDLE_RESEND_MS);
+    let settle = Duration::from_millis(INPUT_SETTLE_MS);
     let mut next_frame = Instant::now();
     let mut last_sent: Option<Instant> = None;
     // UDP 최대 크기 — 작은 버퍼는 Windows 에서 큰 데이터그램 하나에 오류(WSAEMSGSIZE)를 낸다.
@@ -241,7 +242,12 @@ fn run(
                         match proto::parse::<Input>(text) {
                             Ok(i) => {
                                 inj.apply(&i);
-                                pending.extend(is_timed(&i).map(|s| (s, Instant::now())));
+                                if let Some(s) = is_timed(&i) {
+                                    let t = Instant::now();
+                                    pending.push((s, t));
+                                    // 다음 박자(최대 33ms)를 기다리지 않고 화면이 그려질 만큼만 기다려 찍는다.
+                                    next_frame = next_frame.min(t + settle);
+                                }
                             }
                             Err(kind) => warn!(event = "input.bad", kind = ?kind),
                         }
@@ -279,10 +285,12 @@ fn run(
                     }
                 }
             }
+            let mut fresh = false;
             match cap.as_mut().map(Capturer::next) {
                 Some(Ok(Some(f))) => {
                     video.set_frame(&f.bgra, f.width, f.height);
                     last_sent = None;
+                    fresh = true;
                 }
                 Some(Err(e)) => {
                     warn!(event = "capture.failed", why = %e);
@@ -290,8 +298,10 @@ fn run(
                 }
                 _ => {}
             }
+            // 반영된 장: 입력 뒤 INPUT_SETTLE_MS 지나 새로 찍힌 장, 또는 한 프레임 간격이 지난 장.
             // 입력이 화면을 안 바꿨어도(커서는 영상에 없다) 한 프레임 뒤엔 보낸다 — D-08 짝이 1초 재전송을 기다리지 않게.
-            let input_due = pending.iter().any(|(_, t)| now - *t >= every);
+            let applied = |t: &Instant| now - *t >= every || (fresh && now - *t >= settle);
+            let input_due = pending.iter().any(|(_, t)| applied(t));
             let due = video.keyframe || input_due || last_sent.is_none_or(|t| now - t >= idle);
             if let (true, Some(mid), Some(pt)) = (due, mid, pt) {
                 if let Some(bits) = video.encode()? {
@@ -304,7 +314,7 @@ fn run(
                     // D-08: 주입 뒤 처음 인코딩한 프레임의 RTP 타임스탬프(str0m 은 이 값을 그대로 쓴다).
                     if let Some(mut ch) = chans.control.and_then(|id| rtc.channel(id)) {
                         let (ready, wait): (Vec<_>, Vec<_>) =
-                            pending.drain(..).partition(|(_, t)| now - *t >= every);
+                            pending.drain(..).partition(|(_, t)| applied(t));
                         pending = wait;
                         for (seq, _) in ready {
                             let m = Control::InputApplied {
@@ -315,6 +325,10 @@ fn run(
                         }
                     }
                 }
+            }
+            // 일찍 찍은 장에 반영이 없었으면(화면 안 바뀜) 다음 장은 박자가 아니라 입력 + 한 프레임 간격에.
+            if let Some(t) = pending.iter().map(|p| p.1).min() {
+                next_frame = next_frame.min((t + every).max(now + Duration::from_millis(1)));
             }
         }
 

@@ -9,6 +9,7 @@ pub const VIDEO_FPS: u32 = 30;
 pub const VIDEO_BITRATE_KBPS: u32 = 4000;
 pub const VIDEO_IDLE_RESEND_MS: u64 = 1000;
 pub const VIDEO_ENC_THREADS: u16 = 4;
+pub const INPUT_SETTLE_MS: u64 = 20;
 
 /// 보낼 크기 — 긴 변이 VIDEO_MAX_EDGE 이하가 되게 정수배로 줄이고, H.264 4:2:0 이라 짝수로 자른다.
 pub fn out_size(w: usize, h: usize) -> (usize, usize, usize) {
