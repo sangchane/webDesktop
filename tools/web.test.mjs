@@ -234,9 +234,13 @@ function replay(v) {
 test('폰 가상 키보드: 한글 문장·Ctrl+C·F5 (SC-011)', async () => {
   const sid = sessionOf(1);
   const from = (await inputs(phone, sid)).length;
+  const videoBox = () => phone.locator('video').boundingBox();
+  const before = await videoBox();
   await phone.getByRole('button', { name: '가상 키보드' }).tap();
   const kb = phone.getByRole('group', { name: '가상 키보드' });
   await kb.waitFor();
+  // 키보드는 화면 위에 덮인다 — PC 화면 크기·자리가 그대로(사용자 2026-11-24 「화면이 축소가 되네」).
+  assert.deepEqual(await videoBox(), before, '키보드를 열어도 화면 크기 그대로');
   const press = (name) => kb.getByRole('button', { name, exact: true }).tap();
   await press('한글');
   // 정답지: 두벌식으로 「안녕하세요 원격 테스트」를 치는 자모 순서.
@@ -268,9 +272,12 @@ test('폰 가상 키보드: 한글 문장·Ctrl+C·F5 (SC-011)', async () => {
     const r = await b.boundingBox();
     assert.ok(r.x >= 0 && r.x + r.width <= 390 && r.height >= 34, `${await b.textContent()}: ${JSON.stringify(r)}`);
   }
+  // 키보드는 무대 위에 덮이고, 특수키 막대는 무대 아래에 그대로 있다.
   const stage = await phone.locator('.stage').boundingBox();
   const vk = await kb.boundingBox();
-  assert.ok(stage.y + stage.height <= vk.y, '키보드가 화면을 가리지 않는다');
+  const bar = await phone.locator('.keys').boundingBox();
+  assert.ok(vk.y >= stage.y && vk.y + vk.height <= stage.y + stage.height + 0.5, '키보드가 무대 안에 덮인다');
+  assert.ok(stage.y + stage.height <= bar.y + 0.5, '막대는 무대 아래');
   await phone.screenshot({ path: join(OUT, 'remote-vkbd-390.png') });
   await phone.getByRole('button', { name: '가상 키보드' }).tap();
   await kb.waitFor({ state: 'detached' });
