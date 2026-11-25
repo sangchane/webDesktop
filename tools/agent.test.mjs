@@ -16,6 +16,8 @@ const PROFILE = process.env.AGENT_PROFILE === 'release' ? 'release' : 'debug';
 const EXE = join(ROOT, `target/${PROFILE}/webdesktop-agent.exe`);
 const HOME = mkdtempSync(join(tmpdir(), 'webdesktop-agent-'));
 const running = [];
+// 사용자 에이전트(ASK_PORT 47913)와 겹치지 않게.
+const ASK_PORT = 47923;
 let browser;
 
 before(async () => {
@@ -32,7 +34,7 @@ after(async () => {
 });
 
 function agent() {
-  const p = spawn(EXE, [], { env: { ...process.env, WEBDESKTOP_HOME: HOME, WEBDESKTOP_HUB: HUB }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const p = spawn(EXE, [], { env: { ...process.env, WEBDESKTOP_HOME: HOME, WEBDESKTOP_HUB: HUB, WEBDESKTOP_ASK_PORT: String(ASK_PORT) }, stdio: ['pipe', 'pipe', 'pipe'] });
   const a = { p, out: '' };
   p.stdout.on('data', (d) => (a.out += d));
   p.stderr.on('data', (d) => (a.out += d));
@@ -191,7 +193,64 @@ test('실제 화면: 뷰어 offer → 에이전트 answer → H.264 프레임, �
   if (PROFILE === "release") assert.ok(slowest < 400, `input.applied 가장 느림 ${slowest}ms`);
 
   v.ws.send(JSON.stringify({ t: 'session.end', session_id: s.session_id, reason: 'viewer_closed' }));
+  v.ws.close();
   console.log(`실제 화면 ${video.w}x${video.h} ${video.codec}, input.applied 가장 느림 ${slowest}ms`);
+});
+
+// FR-023 — Claude Code 훅과 같은 curl 명령으로 보낸다(hook_command). 출력 = 훅 stdout.
+function curlAsk(body, headers = ['-H', 'x-webdesktop: 1']) {
+  const t0 = Date.now();
+  const c = spawn('curl', ['-s', '-m', '115', '-w', '\n%{http_code}', ...headers, '--data-binary', '@-', `http://127.0.0.1:${ASK_PORT}/ask`]);
+  let out = '';
+  c.stdout.on('data', (d) => (out += d));
+  c.stdin.end(JSON.stringify(body));
+  return new Promise((r) => c.on('exit', () => {
+    const i = out.lastIndexOf('\n');
+    r({ body: out.slice(0, i), status: Number(out.slice(i + 1)), ms: Date.now() - t0 });
+  }));
+}
+const HOOK = { session_id: 's', cwd: String.raw`C:\work\proj`, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'echo hi' } };
+const decision = (behavior, extra = {}) => ({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior, ...extra } } });
+
+async function viewer(viewer_id) {
+  const tk = (await api('/api/ws-ticket', { method: 'POST', body: { viewer_id } })).body;
+  const v = open(`${tk.hub_ws_url}?ticket=${tk.ticket}`);
+  await v.opened;
+  v.ws.send(JSON.stringify({ t: 'viewer.hello', viewer_id, proto: 1 }));
+  return v;
+}
+
+test('권한 요청: 뷰어 없으면 바로 결정 없음, 카드 허용·거부가 훅 출력으로, 늦게 붙은 뷰어도 카드를 받음', async () => {
+  await waitFor('켜짐', online);
+  const dev = (await api('/api/devices')).body[0];
+  // 입구 지킴: 표시 머리글 없음 → 403
+  assert.equal((await curlAsk(HOOK, [])).status, 403);
+
+  const none = await curlAsk(HOOK);
+  assert.equal(none.status, 200);
+  assert.equal(none.body, '');
+  assert.ok(none.ms < 1500, `뷰어 없을 때 ${none.ms}ms`);
+
+  const v1 = await viewer('viewer-ask-1');
+  const pending = curlAsk(HOOK);
+  const m = await until(v1, (x) => x.t === 'ask.new');
+  assert.deepEqual({ ...m, ask_id: 'x' }, { t: 'ask.new', ask_id: 'x', device_id: dev.id, project: 'proj', tool: 'Bash', detail: 'echo hi', truncated: false, wait_sec: 110 });
+  const v2 = await viewer('viewer-ask-2');
+  const again = await until(v2, (x) => x.t === 'ask.new');
+  assert.equal(again.ask_id, m.ask_id);
+  v1.ws.send(JSON.stringify({ t: 'ask.answer', ask_id: m.ask_id, device_id: dev.id, allow: true }));
+  const r = await pending;
+  assert.deepEqual(JSON.parse(r.body), decision('allow'));
+  await until(v2, (x) => x.t === 'ask.done' && x.ask_id === m.ask_id);
+
+  const file = String.raw`C:\work\proj\a.rs`;
+  const p2 = curlAsk({ ...HOOK, tool_name: 'Edit', tool_input: { file_path: file } });
+  const m2 = await until(v2, (x) => x.t === 'ask.new');
+  assert.equal(m2.detail, file);
+  v2.ws.send(JSON.stringify({ t: 'ask.answer', ask_id: m2.ask_id, device_id: dev.id, allow: false }));
+  assert.deepEqual(JSON.parse((await p2).body), decision('deny', { message: '폰에서 거부했습니다' }));
+  v1.ws.close();
+  v2.ws.close();
 });
 
 test('같은 기기로 두 번째 에이전트가 붙으면 앞 에이전트가 끝남', async () => {

@@ -31,6 +31,17 @@ pub const WS_TICKET_TTL_SEC: u64 = 60;
 /// 접속 기록에 남기는 뷰어 User-Agent 글자 수 상한.
 pub const VIEWER_UA_MAX: usize = 256;
 
+/// 03 상수 표 — 권한 요청 카드(FR-023, DL-24).
+pub const ASK_WAIT_SEC: u32 = 110;
+pub const ASK_HOOK_TIMEOUT_SEC: u32 = 120;
+pub const ASK_PORT: u16 = 47913;
+pub const ASK_DETAIL_MAX: usize = 2000;
+pub const ASK_PENDING_MAX: usize = 8;
+/// 카드의 폴더·도구 이름 상한.
+pub const ASK_LABEL_MAX: usize = 128;
+/// 훅이 127.0.0.1 로 보내는 본문 상한(Write 는 파일 전체가 온다 — 허브로는 잘린 detail 만 간다).
+pub const ASK_BODY_MAX: usize = 1024 * 1024;
+
 /// E-05 서명 대상 = nonce 글자 바이트 ‖ device_id 글자 바이트. 허브·에이전트가 같은 함수를 쓴다.
 pub fn auth_message(nonce: &str, device_id: &str) -> Vec<u8> {
     [nonce.as_bytes(), device_id.as_bytes()].concat()
@@ -127,6 +138,11 @@ fn text_ok(s: &str, max: usize) -> bool {
 /// 식별자 꼴(uuid 글자) — 허브 입구와 에이전트 설정 검사가 같이 쓴다.
 pub fn id_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= ID_MAX && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// 카드 한 줄 이름 — 비어도 되고, 제어 문자 없이 ASK_LABEL_MAX 자까지.
+fn label_ok(s: &str) -> bool {
+    s.chars().count() <= ASK_LABEL_MAX && !s.chars().any(char::is_control)
 }
 
 fn b64_ok(s: &str) -> bool {
@@ -389,6 +405,31 @@ pub enum WsMsg {
         new_session_used: bool,
         path: Option<NetPath>,
     },
+    /// FR-023 에이전트→허브→뷰어: Claude Code 가 권한을 묻는다. 허브가 device_id 를 인증된 값으로 덮는다.
+    #[serde(rename = "ask.new")]
+    AskNew {
+        ask_id: String,
+        device_id: String,
+        project: String,
+        tool: String,
+        detail: String,
+        /// detail 을 ASK_DETAIL_MAX 로 잘랐다 — 다 못 본 명령은 폰에서 허용하지 않는다.
+        truncated: bool,
+        wait_sec: u32,
+    },
+    /// FR-023 뷰어→허브→에이전트.
+    #[serde(rename = "ask.answer")]
+    AskAnswer {
+        ask_id: String,
+        device_id: String,
+        allow: bool,
+    },
+    /// FR-023 끝남(답함·시간 초과) 에이전트→허브→뷰어. 뷰어가 없으면 허브→에이전트.
+    #[serde(rename = "ask.done")]
+    AskDone { ask_id: String, device_id: String },
+    /// FR-023 허브→에이전트: 새 뷰어가 붙었다 — 기다리는 요청을 다시 보내라.
+    #[serde(rename = "ask.sync")]
+    AskSync {},
     /// WebSocket 오류 `{t:"error", type, detail}` (05 「규약」).
     #[serde(rename = "error")]
     Error {
@@ -426,7 +467,27 @@ impl Validate for WsMsg {
                 reconnect_ms,
                 ..
             } => check(id_ok(session_id) && reconnect_ms.len() <= RECONNECT_LOG_MAX),
-            Error { .. } => Ok(()),
+            AskNew {
+                ask_id,
+                device_id,
+                project,
+                tool,
+                detail,
+                wait_sec,
+                ..
+            } => check(
+                id_ok(ask_id)
+                    && id_ok(device_id)
+                    && label_ok(project)
+                    && label_ok(tool)
+                    && detail.chars().count() <= ASK_DETAIL_MAX
+                    && *wait_sec <= ASK_WAIT_SEC,
+            ),
+            AskAnswer {
+                ask_id, device_id, ..
+            }
+            | AskDone { ask_id, device_id } => check(id_ok(ask_id) && id_ok(device_id)),
+            AskSync {} | Error { .. } => Ok(()),
         }
     }
 }
@@ -545,6 +606,30 @@ mod tests {
         for (v, t) in cases {
             let m: WsMsg = parse(&v.to_string()).unwrap_or_else(|e| panic!("{t}: {e:?}"));
             assert_eq!(serde_json::to_value(&m).unwrap(), v, "{t} 왕복");
+        }
+    }
+
+    #[test]
+    fn ask_messages_round_trip_and_check() {
+        let cases = [
+            json!({"t":"ask.new","ask_id":"a1","device_id":"d1","project":"WebDesktop","tool":"Bash","detail":"rm -rf x\nls","truncated":false,"wait_sec":110}),
+            json!({"t":"ask.answer","ask_id":"a1","device_id":"d1","allow":true}),
+            json!({"t":"ask.done","ask_id":"a1","device_id":"d1"}),
+            json!({"t":"ask.sync"}),
+        ];
+        for v in cases {
+            let m: WsMsg = parse(&v.to_string()).unwrap_or_else(|e| panic!("{v}: {e:?}"));
+            assert_eq!(serde_json::to_value(&m).unwrap(), v);
+        }
+        let bad = [
+            json!({"t":"ask.new","ask_id":"a 1","device_id":"d1","project":"p","tool":"Bash","detail":"","truncated":false,"wait_sec":1}),
+            json!({"t":"ask.new","ask_id":"a1","device_id":"d1","project":"p\n","tool":"Bash","detail":"","truncated":false,"wait_sec":1}),
+            json!({"t":"ask.new","ask_id":"a1","device_id":"d1","project":"p","tool":"Bash","detail":"x".repeat(ASK_DETAIL_MAX + 1),"truncated":false,"wait_sec":1}),
+            json!({"t":"ask.new","ask_id":"a1","device_id":"d1","project":"p","tool":"Bash","detail":"","truncated":false,"wait_sec":ASK_WAIT_SEC + 1}),
+            json!({"t":"ask.answer","ask_id":"","device_id":"d1","allow":false}),
+        ];
+        for v in bad {
+            assert!(parse::<WsMsg>(&v.to_string()).is_err(), "{v}");
         }
     }
 

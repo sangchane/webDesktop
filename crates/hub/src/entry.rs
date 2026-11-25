@@ -46,6 +46,9 @@ struct ViewerAtt {
     viewer_id: String,
     /// viewer.hello 를 받았다.
     ready: bool,
+    /// 연 시각 — 아직 ping 을 안 보낸 뷰어가 산 것인지 가린다(FR-023).
+    #[serde(default)]
+    opened_at: i64,
 }
 
 #[durable_object]
@@ -587,6 +590,8 @@ impl Hub {
         let t = now();
         self.store.device_seen(&device_id, t)?;
         log("info", "agent.connected", json!({ "device_id": device_id }));
+        // 인증이 끝난 뒤에만 — 에이전트는 이걸 받고 기다리는 권한 요청을 다시 낸다(재접속 사이 붙은 뷰어용).
+        let _ = ws.send(&WsMsg::AskSync {});
         self.push_status(&device_id, true, t)
     }
 
@@ -651,6 +656,7 @@ impl Hub {
         let att = ViewerAtt {
             viewer_id,
             ready: false,
+            opened_at: now_ms,
         };
         if let Err(e) = pair.server.serialize_attachment(att) {
             let _ = pair.server.close(Some(1011), Some("internal"));
@@ -841,8 +847,32 @@ impl Hub {
                         let on = online.contains(&d.id);
                         let _ = ws.send(&status_msg(to_device(d, on, now_ms)));
                     }
+                    // 기다리는 권한 요청은 에이전트가 갖고 있다 — 다시 보내 달라고(DL-24).
+                    for (a, att) in self.agent_sockets() {
+                        if att.device_id.is_some() && !att.stale {
+                            let _ = a.send(&WsMsg::AskSync {});
+                        }
+                    }
                 }
                 _ => ws_error(ws, ErrorType::Unauthorized, true),
+            }
+            return Ok(());
+        }
+        // FR-023 — 뷰어는 소유자 한 명이라 어느 기기의 요청에도 답할 수 있다.
+        if let WsMsg::AskAnswer {
+            ask_id, device_id, ..
+        } = &msg
+        {
+            match self.agent_for(device_id) {
+                Some(a) => {
+                    log(
+                        "info",
+                        "ask.answer",
+                        json!({ "device_id": device_id, "ask_id": ask_id }),
+                    );
+                    let _ = a.send(&msg);
+                }
+                None => ws_error(ws, ErrorType::DeviceOffline, false),
             }
             return Ok(());
         }
@@ -940,6 +970,66 @@ impl Hub {
 
     /// 인증된 에이전트의 신호·종료 — 그 세션의 뷰어로.
     fn agent_message(&self, ws: &WebSocket, device_id: &str, msg: WsMsg) -> Result<()> {
+        // FR-023 — 저장하지 않고 뷰어 전부에게. device_id 는 인증된 값으로 덮는다. 명령 원문(detail)은 로그에 남기지 않는다.
+        match msg {
+            WsMsg::AskNew {
+                ask_id,
+                project,
+                tool,
+                detail,
+                truncated,
+                wait_sec,
+                ..
+            } => {
+                let viewers = self.viewers();
+                // 뒤로 간 폰 탭은 연결만 남고 ping 이 멎는다 — 그런 뷰어만 있으면 터미널을 막지 않는다.
+                // 마지막 ping(없으면 연 시각)이 OFFLINE_DETECT_SEC 안인 뷰어만 산 것으로.
+                let now_ms = now();
+                let live = viewers
+                    .iter()
+                    .filter(|(v, att)| {
+                        let t = self.auto_response_at(v).unwrap_or(att.opened_at);
+                        now_ms - t <= (proto::OFFLINE_DETECT_SEC * 1000) as i64
+                    })
+                    .count();
+                log(
+                    "info",
+                    "ask.new",
+                    json!({ "device_id": device_id, "ask_id": ask_id, "tool": tool, "viewers": live }),
+                );
+                if live == 0 {
+                    let _ = ws.send(&WsMsg::AskDone {
+                        ask_id,
+                        device_id: device_id.to_owned(),
+                    });
+                    return Ok(());
+                }
+                let m = WsMsg::AskNew {
+                    ask_id,
+                    device_id: device_id.to_owned(),
+                    project,
+                    tool,
+                    detail,
+                    truncated,
+                    wait_sec,
+                };
+                for (v, _) in viewers {
+                    let _ = v.send(&m);
+                }
+                return Ok(());
+            }
+            WsMsg::AskDone { ask_id, .. } => {
+                let m = WsMsg::AskDone {
+                    ask_id,
+                    device_id: device_id.to_owned(),
+                };
+                for (v, _) in self.viewers() {
+                    let _ = v.send(&m);
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
         let sid = match session_of(&msg) {
             Some(sid) if !matches!(msg, WsMsg::ViewerStats { .. }) => sid,
             _ => {

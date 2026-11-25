@@ -58,8 +58,8 @@ export function agentKey() {
 
 export const enrollBody = (code, pub, name = '집 PC') => ({ code, pubkey: pub, name, os: 'windows', agent_version: '0.1.0' });
 
-/** WebSocket 을 열고 받은 메시지·닫힘을 줄 세운다. */
-export function open(url, headers = {}) {
+/** WebSocket 을 열고 받은 메시지·닫힘을 줄 세운다. skip 에 맞는 메시지는 줄에 넣지 않는다. */
+export function open(url, headers = {}, skip = () => false) {
   const ws = new WebSocket(url, { headers });
   const opened = new Promise((res, rej) => {
     ws.onopen = res;
@@ -69,7 +69,10 @@ export function open(url, headers = {}) {
   const waiters = [];
   let closed = null;
   const push = (x) => (waiters.length ? waiters.shift()(x) : inbox.push(x));
-  ws.onmessage = (e) => push(typeof e.data === 'string' && e.data.startsWith('{') ? JSON.parse(e.data) : e.data);
+  ws.onmessage = (e) => {
+    const m = typeof e.data === 'string' && e.data.startsWith('{') ? JSON.parse(e.data) : e.data;
+    if (!skip(m)) push(m);
+  };
   ws.onclose = (e) => {
     closed = { code: e.code, reason: e.reason };
     push({ closed });
@@ -108,7 +111,8 @@ export async function until(c, pred, ms = 5000) {
 }
 
 export async function connectAgent(deviceId, key, { proto = 1, sigOver, ip } = {}) {
-  const a = open(HUB.replace('http', 'ws') + '/agent/ws', ip ? { 'x-test-ip': ip } : {});
+  // 뷰어가 붙을 때마다 오는 ask.sync(FR-023)는 세션 시험의 「다음 메시지」를 밀어낸다 — 가짜 에이전트는 기다리는 요청이 없다.
+  const a = open(HUB.replace('http', 'ws') + '/agent/ws', ip ? { 'x-test-ip': ip } : {}, (m) => m?.t === 'ask.sync');
   const hello = await a.next();
   assert.equal(hello.t, 'hello');
   const sig = sigOver ?? sign(null, Buffer.from(hello.nonce + deviceId), key.privateKey).toString('base64');

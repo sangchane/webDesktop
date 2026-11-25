@@ -347,6 +347,44 @@ test('끊기 → 에이전트에 viewer_closed, 목록으로', async () => {
   );
 });
 
+test('권한 요청 카드: 두 화면에 뜨고, 폰에서 허용 → 에이전트로, 끝나면 다른 화면에서도 사라짐 (FR-023)', async () => {
+  const detail = 'git push --force origin main\n' + 'x'.repeat(300);
+  send({ t: 'ask.new', ask_id: 'ask1', device_id: deviceId, project: 'proj', tool: 'Bash', detail, truncated: false, wait_sec: 110 });
+  for (const pg of [phone, desk]) {
+    const card = pg.getByRole('alertdialog');
+    await card.waitFor();
+    await card.getByText('집 PC · proj').waitFor();
+    assert.equal(await card.locator('.ask-detail').textContent(), detail);
+  }
+  const box = await phone.getByRole('alertdialog').boundingBox();
+  assert.ok(box.x >= 0 && box.x + box.width <= 390, `카드가 390 안: ${JSON.stringify(box)}`);
+  await snapshot(phone, 'ask-phone');
+  // 같은 요청이 다시 와도(ask.sync) 카드는 하나
+  send({ t: 'ask.new', ask_id: 'ask1', device_id: deviceId, project: 'proj', tool: 'Bash', detail, truncated: false, wait_sec: 100 });
+  await phone.getByRole('button', { name: '허용' }).click();
+  await eventually(() => toAgent.find((m) => m.t === 'ask.answer' && m.ask_id === 'ask1' && m.allow === true && m.device_id === deviceId), 'ask.answer');
+  await phone.getByRole('alertdialog').waitFor({ state: 'detached' });
+  send({ t: 'ask.done', ask_id: 'ask1', device_id: deviceId });
+  await desk.getByRole('alertdialog').waitFor({ state: 'detached' });
+  assert.equal(toAgent.filter((m) => m.t === 'ask.answer').length, 1);
+
+  // 두 요청: 앞 것을 허용하면 뒤 것이 같은 자리에 뜨지만 단추는 잠깐 잠겨 있다(두 번 누르기 방지).
+  // 뒤 것은 잘린 명령 — 허용은 계속 막히고 거부만 된다.
+  send({ t: 'ask.new', ask_id: 'ask2', device_id: deviceId, project: 'proj', tool: 'Bash', detail: 'ls', truncated: false, wait_sec: 110 });
+  send({ t: 'ask.new', ask_id: 'ask3', device_id: deviceId, project: 'proj', tool: 'Bash', detail: 'y'.repeat(50) + '…', truncated: true, wait_sec: 110 });
+  await phone.getByText('기다리는 요청 1개 더').waitFor();
+  await phone.getByRole('button', { name: '허용' }).click();
+  await phone.getByText('명령이 길어 다 보이지 않습니다').waitFor();
+  assert.ok(await phone.getByRole('button', { name: '거부' }).isDisabled(), '새 카드의 거부는 잠깐 잠김');
+  assert.ok(await phone.getByRole('button', { name: '허용' }).isDisabled(), '잘린 명령은 허용 막힘');
+  await phone.getByRole('button', { name: '거부' }).click();
+  await eventually(() => toAgent.find((m) => m.t === 'ask.answer' && m.ask_id === 'ask3' && m.allow === false), 'ask3 거부');
+  assert.deepEqual(toAgent.filter((m) => m.t === 'ask.answer').map((m) => [m.ask_id, m.allow]), [['ask1', true], ['ask2', true], ['ask3', false]]);
+  await phone.getByRole('alertdialog').waitFor({ state: 'detached' });
+  for (const id of ['ask2', 'ask3']) send({ t: 'ask.done', ask_id: id, device_id: deviceId });
+  await desk.getByRole('alertdialog').waitFor({ state: 'detached' });
+});
+
 test('?bench=3 — 저절로 3번 열고, 앞 2번은 닫고, 마지막은 열어 둔다 (SC-002 시험)', async () => {
   const n0 = toAgent.filter((m) => m.t === 'session.start').length;
   const page = await viewerPage();
@@ -360,8 +398,8 @@ test('?bench=3 — 저절로 3번 열고, 앞 2번은 닫고, 마지막은 열�
   await page.context().close();
 });
 
-test('ui-check: 빈 목록·목록·기기 추가·가상 키보드 (1440·390)', { skip: !existsSync(UI_CHECK) && 'ui-check 없음' }, () => {
-  for (const name of ['list-empty', 'list', 'add', 'remote-vkbd']) {
+test('ui-check: 빈 목록·목록·기기 추가·가상 키보드·권한 요청 카드 (1440·390)', { skip: !existsSync(UI_CHECK) && 'ui-check 없음' }, () => {
+  for (const name of ['list-empty', 'list', 'add', 'remote-vkbd', 'ask-phone']) {
     try {
       const out = execFileSync('node', [UI_CHECK, join(OUT, `${name}.html`), '--out', join(OUT, 'shots')], { encoding: 'utf8' });
       assert.match(out, /ui-check passed/, out);

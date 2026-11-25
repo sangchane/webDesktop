@@ -12,13 +12,14 @@ path = "src/main.rs"
 [dependencies]
 proto = { path = "../proto" }
 serde.workspace = true
-serde_json.workspace = true
+# preserve_order — --claude-hook 이 사용자 settings.json 의 키 순서를 그대로 둔다.
+serde_json = { workspace = true, features = ["preserve_order"] }
 base64 = "0.22"
 ed25519-dalek = "3"
 getrandom = "0.4"
 # TLS 는 OS 것(Windows SChannel) — ring·aws-lc 빌드를 피한다.
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
-tokio = { version = "1", features = ["rt", "time", "macros", "net", "sync"] }
+tokio = { version = "1", features = ["rt", "time", "macros", "net", "sync", "io-util"] }
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tracing = "0.1"

@@ -1,5 +1,6 @@
 //! 웹앱 — 화면·입력 변환·브라우저 WebRTC (04 「코드 구조」). 메시지는 `proto` 를 그대로 쓴다.
 mod api;
+mod ask;
 mod errors;
 mod hangul;
 mod hub;
@@ -52,6 +53,8 @@ pub struct AppState {
     pub notice: RwSignal<Option<String>>,
     /// 허브 WebSocket — None = 아직, Err = 끊김.
     pub hub: RwSignal<Option<Result<(), Fail>>>,
+    /// FR-023 기다리는 Claude Code 권한 요청.
+    pub asks: RwSignal<Vec<ask::Ask>>,
 }
 
 fn main() {
@@ -89,6 +92,9 @@ fn refresh(st: AppState) {
 }
 
 fn on_msg(st: AppState, m: WsMsg) {
+    if ask::on_hub(st, &m) {
+        return;
+    }
     match m {
         WsMsg::DeviceStatus {
             device_id,
@@ -124,6 +130,7 @@ fn App() -> impl IntoView {
         load: RwSignal::new(Load::Loading),
         notice: RwSignal::new(None),
         hub: RwSignal::new(None),
+        asks: RwSignal::new(vec![]),
     };
     provide_context(st);
     session::close_on_pagehide();
@@ -152,9 +159,10 @@ fn App() -> impl IntoView {
             t0: api::now_ms(),
         });
     });
-    move || match st.screen.get() {
+    let screen = move || match st.screen.get() {
         Screen::List => view! { <list::List/> }.into_any(),
         Screen::Add => view! { <list::Add/> }.into_any(),
         Screen::Remote { device, t0 } => view! { <remote::Remote device t0/> }.into_any(),
-    }
+    };
+    view! { {screen} <ask::Asks/> }
 }

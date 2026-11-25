@@ -1,5 +1,5 @@
 //! 상주 계층 — 설정·기기 키·등록(E-04)·허브 서명 WS(E-05)·재접속 (04 「코드 구조」 resident).
-use crate::{helper, platform};
+use crate::{ask, helper, platform};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
@@ -7,7 +7,7 @@ use proto::{EnrollReq, EnrollResp, ErrorType, IceServer, Os, Problem, WsMsg, PRO
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::BufRead, path::PathBuf, sync::mpsc, time::Duration};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::time::{interval_at, sleep, sleep_until, timeout, Instant};
+use tokio::time::{interval_at, sleep_until, timeout, Instant};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
@@ -389,8 +389,15 @@ impl Sessions {
 pub async fn run(cfg: &Config, key: &SigningKey) -> Stop {
     let mut wait = 1;
     let mut sessions = Sessions::new();
+    let mut asks = ask::Asks::new();
+    // 시험은 WEBDESKTOP_ASK_PORT 로 사용자 에이전트와 겹치지 않게.
+    let port = std::env::var("WEBDESKTOP_ASK_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(proto::ASK_PORT);
+    tokio::spawn(ask::serve(port, asks.tx.clone()));
     loop {
-        match connect(cfg, key, &mut sessions).await {
+        match connect(cfg, key, &mut sessions, &mut asks).await {
             Outcome::Stop(s) => return s,
             Outcome::Retry { healthy, why } => {
                 if healthy {
@@ -398,14 +405,26 @@ pub async fn run(cfg: &Config, key: &SigningKey) -> Stop {
                 }
                 warn!(event = "agent.disconnected", why, retry_sec = wait);
                 println!("허브 연결이 끊겼습니다({why}). {wait}초 뒤 다시 붙습니다.");
-                sleep(Duration::from_secs(wait)).await;
+                // 끊긴 동안 온 권한 요청은 기다리지 않고 터미널 창으로(FR-023).
+                let until = Instant::now() + Duration::from_secs(wait);
+                loop {
+                    tokio::select! {
+                        _ = sleep_until(until) => break,
+                        Some(ev) = asks.rx.recv() => asks.offline(ev),
+                    }
+                }
                 wait = next_wait(wait);
             }
         }
     }
 }
 
-async fn connect(cfg: &Config, key: &SigningKey, sessions: &mut Sessions) -> Outcome {
+async fn connect(
+    cfg: &Config,
+    key: &SigningKey,
+    sessions: &mut Sessions,
+    asks: &mut ask::Asks,
+) -> Outcome {
     let beat = Duration::from_secs(proto::AGENT_HEARTBEAT_SEC);
     let silent = Duration::from_secs(proto::OFFLINE_DETECT_SEC);
     let mut ws = match timeout(beat, tokio_tungstenite::connect_async(ws_url(&cfg.hub_url))).await {
@@ -461,6 +480,14 @@ async fn connect(cfg: &Config, key: &SigningKey, sessions: &mut Sessions) -> Out
                     return Outcome::Retry { healthy, why: e.to_string() };
                 }
             }
+            Some(ev) = asks.rx.recv() => {
+                if let Some(m) = asks.on_ev(ev, &cfg.device_id) {
+                    let m = serde_json::to_string(&m).expect("WsMsg 직렬화");
+                    if let Err(e) = ws.send(Message::text(m)).await {
+                        return Outcome::Retry { healthy, why: e.to_string() };
+                    }
+                }
+            }
             m = ws.next() => { last_rx = Instant::now(); match m {
                 None => return Outcome::Retry { healthy, why: "연결 닫힘".into() },
                 Some(Err(e)) => return Outcome::Retry { healthy, why: e.to_string() },
@@ -481,6 +508,14 @@ async fn connect(cfg: &Config, key: &SigningKey, sessions: &mut Sessions) -> Out
                         warn!(event = "hub.error", kind = ?kind);
                         if let Some(s) = fatal(kind) {
                             return Outcome::Stop(s);
+                        }
+                    }
+                    Ok(m @ (WsMsg::AskAnswer { .. } | WsMsg::AskDone { .. } | WsMsg::AskSync {})) => {
+                        for m in asks.on_hub(m, &cfg.device_id) {
+                            let m = serde_json::to_string(&m).expect("WsMsg 직렬화");
+                            if let Err(e) = ws.send(Message::text(m)).await {
+                                return Outcome::Retry { healthy, why: e.to_string() };
+                            }
                         }
                     }
                     Ok(m) => sessions.on_hub(m),

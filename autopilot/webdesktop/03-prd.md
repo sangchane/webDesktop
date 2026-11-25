@@ -44,6 +44,7 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | FR-020 | 파일 전송 | P2 | R11 |
 | FR-021 | 원격 깨우기(같은 망 다른 에이전트가 WoL 대신 보냄) | P2 | R2 |
 | FR-022 | VPN 기기 이름으로 접속(사설 DNS) | P2 | US-4 |
+| FR-023 | Claude Code 권한 요청(PermissionRequest 훅)을 웹앱 카드로 받아 허용·거부. 뷰어가 없으면 훅은 바로 결정 없이 끝난다. 명령 원문은 중계만, 허브에 남기지 않음 | P1 | goals.md 목표 4, DL-24 |
 
 ## 엣지케이스
 | 흐름 | Given | When | Then |
@@ -173,6 +174,14 @@ P1 스토리(US-1·US-2)만으로 MVP 가 성립한다.
 | VIEWER_STATS_EVERY_SEC | 60 | 초 (M-10 계측을 다시 보내는 주기, `session.rs` REPORT_EVERY_MS) | 06 SC-003 측정법 「1분」 |
 | INPUT_BUFFER_KEEP | 64 | 글자 (숨은 입력칸을 비우는 길이, `remote.rs` TEXT_KEEP) | 설계 결정 DL-16 |
 | LATENCY_MATCH_KEEP | 256 | 칸 (지연 짝짓기에 기억하는 프레임·입력 수, 60fps 로 약 4초, `measure.rs` KEEP) | 설계 결정 DL-16 |
+| ASK_WAIT_SEC | 110 | 초 (권한 요청 카드를 폰에서 기다리는 시간, 지나면 터미널 창) | 설계 결정 DL-24 (훅 시한 ASK_HOOK_TIMEOUT_SEC 보다 짧게) |
+| ASK_HOOK_TIMEOUT_SEC | 120 | 초 (Claude Code 훅 `timeout`, curl `-m` 은 이보다 5초 짧게) | 설계 결정 DL-24 (기본 600초는 터미널을 너무 오래 막음 — https://code.claude.com/docs/en/hooks) |
+| ASK_PORT | 47913 | TCP 포트 (127.0.0.1 만, 훅 → 에이전트) | 설계 결정 DL-24 |
+| ASK_DETAIL_MAX | 2000 | 글자 (카드에 보내는 명령·파일 설명 상한, 넘으면 자르고 「…」) | 설계 결정 DL-24 |
+| ASK_PENDING_MAX | 8 | 건 (한 에이전트가 동시에 기다리는 요청, 넘으면 바로 터미널 창) | 설계 결정 DL-24 |
+| ASK_LABEL_MAX | 128 | 글자 (카드의 폴더·도구 이름 상한) | 설계 결정 DL-24 |
+| ASK_BODY_MAX | 1048576 | 바이트 (훅이 127.0.0.1 로 보내는 본문 상한 — Write 는 파일 전체가 온다, 허브로는 잘린 detail 만) | 설계 결정 DL-24 리뷰 |
+| ASK_ARM_MS | 700 | ms (카드가 바뀐 뒤 단추를 잠그는 시간, 두 번 누르기가 다른 요청을 허용하지 않게, `web/src/ask.rs` ARM_MS) | 설계 결정 DL-24 리뷰 |
 
 ## 미결정
 0건
