@@ -372,14 +372,13 @@ impl Converter {
         }
         // Enter 가 키로 안 오고 줄바꿈 글자로 들어온 때(소프트 자판·조합 중 Enter) — Enter 키로 바꾼다.
         // 부른 쪽은 값에 줄바꿈이 있으면 입력칸을 비운다.
-        if let Some(i) = add.iter().position(|&c| c == '\n') {
-            let (before, after) = add.split_at(i);
-            out.extend(self.chars(before));
-            out.extend(self.tap(HID_ENTER));
-            out.extend(self.chars(&after[1..]));
-            return out;
+        // 여러 줄 붙여넣기도 — 줄바꿈마다 Enter.
+        for (i, line) in add.split(|&c| c == '\n').enumerate() {
+            if i > 0 {
+                out.extend(self.tap(HID_ENTER));
+            }
+            out.extend(self.chars(line));
         }
-        out.extend(self.chars(&add));
         out
     }
 
@@ -402,7 +401,7 @@ impl Converter {
             out.extend(self.release());
             return out;
         }
-        for chunk in add.chunks(INPUT_TEXT_MAX).filter(|c| !c.contains(&'\n')) {
+        for chunk in add.chunks(INPUT_TEXT_MAX) {
             out.push(Input::Text {
                 seq: self.next(),
                 text: chunk.iter().collect(),
@@ -940,6 +939,14 @@ mod tests {
         let out = c.text("ab\ncd");
         assert_eq!(texts(&out), ["ab", "cd"]);
         assert_eq!(keys(&out), [(HID_ENTER, true), (HID_ENTER, false)]);
+    }
+
+    #[test]
+    fn multi_line_paste_keeps_every_line() {
+        let mut c = Converter::new();
+        let out = c.text("a\nb\nc");
+        assert_eq!(texts(&out), ["a", "b", "c"]);
+        assert_eq!(keys(&out).len(), 4);
     }
 
     #[test]

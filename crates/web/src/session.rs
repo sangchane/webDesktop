@@ -87,6 +87,13 @@ pub async fn open(device_id: String, t0: f64, video: HtmlVideoElement, ui: Ui) {
         if GEN.with(Cell::get) != gen {
             return;
         }
+        // 허브에 세션이 만들어진 뒤의 실패 — 허브·에이전트도 닫게 알린다.
+        if let Some(l) = current() {
+            hub::send(&WsMsg::SessionEnd {
+                session_id: l.session_id.clone(),
+                reason: EndReason::Failed,
+            });
+        }
         teardown(Some(errors::text(f)));
         ui.phase.set(Phase::Ended(errors::text(f)));
     }
@@ -401,6 +408,10 @@ fn add_candidate(pc: &RtcPeerConnection, candidate: String) {
 /// 지금 세션이 `sid` 일 때만 정리한다(늦게 끝난 비동기 일이 다음 세션을 닫지 않게).
 fn end_if(sid: &str, msg: &'static str) {
     if current().is_some_and(|l| l.session_id == sid) {
+        hub::send(&WsMsg::SessionEnd {
+            session_id: sid.to_owned(),
+            reason: EndReason::Failed,
+        });
         teardown(Some(msg));
     }
 }

@@ -61,6 +61,14 @@ fn bridge_key(env: &Env) -> Result<Vec<u8>> {
 /// 카카오에 인가 코드를 바꿔 받고, 카카오 ID 토큰을 확인한 뒤 허브가 서명한 ID 토큰으로 바꿔 준다(kakao.rs ③).
 async fn kakao_token(mut req: Request, env: &Env) -> Result<Response> {
     let auth = req.headers().get("authorization")?;
+    // 공개 입구 — 큰 본문은 읽기 전에 거절. 길이 없는 요청은 Access 로그인을 막지 않게 그대로(Workers 자체 상한).
+    let len = req
+        .headers()
+        .get("content-length")?
+        .and_then(|v| v.parse::<usize>().ok());
+    if len.is_some_and(|n| n > proto::WS_MSG_MAX_BYTES) {
+        return problem(ErrorType::TooLarge, None);
+    }
     let body = kakao::token_form(&req.text().await?, auth.as_deref());
     let client_id = kakao::form_value(&body, "client_id")
         .unwrap_or_default()

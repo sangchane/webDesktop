@@ -26,7 +26,7 @@ const TURN_API: &str = "https://rtc.live.cloudflare.com";
 const CLOSE_REPLACED: u16 = 4000;
 const CLOSE_STALE: u16 = 4001;
 const CLOSE_REJECTED: u16 = 4002;
-/// 인증 전 소켓 상한 — 넘으면 새 /agent/ws 를 rate_limited 로 거절.
+/// IP 하나의 인증 전 소켓 상한 — 넘으면 그 IP 의 새 /agent/ws 를 rate_limited 로 거절(한 IP 가 다른 에이전트의 재접속을 막지 못하게).
 const PENDING_MAX: usize = 16;
 
 /// 에이전트 WebSocket 에 붙여 두는 상태 — 휴면 뒤에도 남는다.
@@ -38,6 +38,9 @@ struct AgentAtt {
     /// 허브가 닫는 중(조용함·새 연결로 대체) — 닫힘 이벤트가 last_seen_at·온라인 표시를 덮지 않게.
     #[serde(default)]
     stale: bool,
+    /// 연 IP — 인증 전 상한을 IP 마다 센다.
+    #[serde(default)]
+    ip: String,
 }
 
 /// 뷰어 WebSocket 상태 (E-06). viewer_id 는 입장권에서 온다.
@@ -313,7 +316,7 @@ impl Hub {
                 service::judge_install(row.as_ref(), &token, now_ms)?;
                 self.install_file(&path).await
             }
-            (Method::Get, "/agent/ws") => self.agent_ws(&req, now_ms).map_err(internal),
+            (Method::Get, "/agent/ws") => self.agent_ws(&req, &ip, now_ms).map_err(internal),
             _ => Err(ErrorType::NotFound),
         }
     }
@@ -499,7 +502,7 @@ impl Hub {
     }
 
     /// E-05 1) — 받아들이고 nonce 를 보낸다. 서명 확인은 websocket_message 에서.
-    fn agent_ws(&self, req: &Request, now_ms: i64) -> Result<Response> {
+    fn agent_ws(&self, req: &Request, ip: &str, now_ms: i64) -> Result<Response> {
         let upgrade = req.headers().get("upgrade")?.unwrap_or_default();
         if !upgrade.eq_ignore_ascii_case("websocket") {
             return crate::problem(
@@ -512,7 +515,7 @@ impl Hub {
             if att.device_id.is_none() {
                 if service::is_stale(att.opened_at, now_ms) {
                     let _ = ws.close(Some(CLOSE_STALE), Some("auth timeout"));
-                } else {
+                } else if att.ip == ip {
                     pending += 1;
                 }
             }
@@ -530,6 +533,7 @@ impl Hub {
             device_id: None,
             opened_at: now_ms,
             stale: false,
+            ip: ip.to_owned(),
         };
         if let Err(e) = pair.server.serialize_attachment(att) {
             let _ = pair.server.close(Some(1011), Some("internal"));

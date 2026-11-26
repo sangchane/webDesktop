@@ -117,9 +117,10 @@ fn kbd(vk: u16, scan: u16, flags: u32) -> INPUT {
     }
 }
 
-fn send(inputs: &[INPUT]) {
+/// 모두 보냈으면 true.
+fn send(inputs: &[INPUT]) -> bool {
     if inputs.is_empty() {
-        return;
+        return true;
     }
     // SAFETY: 슬라이스는 호출 동안 살아 있고 크기는 INPUT 하나 크기다.
     let n = unsafe {
@@ -132,7 +133,9 @@ fn send(inputs: &[INPUT]) {
     if n as usize != inputs.len() {
         // 보안 데스크톱(UAC·잠금)에서는 일반 프로세스의 주입이 막힌다 — 첫 작업 2.
         tracing::warn!(event = "input.blocked", sent = n, want = inputs.len());
+        return false;
     }
+    true
 }
 
 fn key_input(k: Key, down: bool) -> INPUT {
@@ -168,18 +171,23 @@ pub struct Injector {
 impl Injector {
     pub fn apply(&mut self, i: &Input) {
         match i {
-            Input::MouseMove { x, y, .. } => send(&[mouse(
-                abs(*x),
-                abs(*y),
-                0,
-                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-            )]),
+            Input::MouseMove { x, y, .. } => {
+                send(&[mouse(
+                    abs(*x),
+                    abs(*y),
+                    0,
+                    MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                )]);
+            }
             Input::MouseButton { button, down, .. } => {
-                self.buttons.retain(|b| b != button);
+                // 놓기가 막히면(보안 데스크톱) 장부에 남겨 release_all 이 다시 놓게.
+                let ok = send(&[mouse(0, 0, 0, button_flag(*button, *down))]);
+                if *down || ok {
+                    self.buttons.retain(|b| b != button);
+                }
                 if *down {
                     self.buttons.push(*button);
                 }
-                send(&[mouse(0, 0, 0, button_flag(*button, *down))]);
             }
             Input::Wheel { dx, dy, .. } => {
                 let mut v = vec![];
@@ -198,12 +206,12 @@ impl Injector {
                     tracing::warn!(event = "input.unknown_key", hid = hid_usage);
                     return;
                 };
+                let ok = send(&[key_input(k, *down)]);
                 if *down {
                     self.keys.insert(*hid_usage);
-                } else {
+                } else if ok {
                     self.keys.remove(hid_usage);
                 }
-                send(&[key_input(k, *down)]);
             }
             Input::Text { text, .. } => {
                 let v: Vec<INPUT> = text

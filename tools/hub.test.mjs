@@ -125,6 +125,20 @@ test('서명 WS: auth 전에 꼴이 틀린 글을 보내면 바로 닫힘', asyn
   assert.equal((await a.next()).closed.code, 4002);
 });
 
+test('서명 WS: 인증 전 연결 상한은 IP 마다 — 한 IP 가 채워도 다른 IP 는 붙는다', async () => {
+  const url = HUB.replace('http', 'ws') + '/agent/ws';
+  const flood = [];
+  for (let i = 0; i < 16; i++) {
+    const c = open(url, { 'x-test-ip': 'flood' });
+    await c.next();
+    flood.push(c);
+  }
+  await assert.rejects(open(url, { 'x-test-ip': 'flood' }).opened);
+  const other = open(url, { 'x-test-ip': 'other' });
+  assert.equal((await other.next()).t, 'hello');
+  for (const c of [...flood, other]) c.ws.close();
+});
+
 test('서명 WS 성공 → 온라인, ping 에 pong, 다시 붙으면 앞 연결 닫힘', async () => {
   const a = await connectAgent(dev.id, dev.key);
   a.ws.send('ping');
